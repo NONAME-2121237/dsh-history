@@ -17,13 +17,31 @@ DSH web 插件：在超长会话里**快速查看、搜索并跳转到所有"你
 
 **前置**：已装好 DSH（`dsh web` 能正常运行），Node.js ≥ 20、pnpm ≥ 10。
 
+> 💡 **装完怎么生效？** 插件安装后，运行配套脚本 **`restart-dsh-web.sh`** 即可自动重启 DSH Web 服务让插件生效（也可手动硬刷新浏览器；仅 host 半更新时需重启）。脚本会自动探测部署方式：
+> - 本机由 **systemd** 管理（`dsh-web.service`）→ 自动走 `systemctl restart`（干净单实例）；
+> - 否则自动发现运行中的 `dsh web` 进程，读取原始启动参数原样重启（nohup）；
+> - 找不到进程时直接用 `dsh web` 启动。
+>
+> 获取脚本（任选其一）：
+> ```bash
+> # 安装 npm 包后（脚本随包分发）
+> cp ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh ~/restart-dsh-web.sh
+> # 或直接从仓库下载
+> curl -O https://raw.githubusercontent.com/chenproton/dsh-history/main/restart-dsh-web.sh
+> ```
+> 然后执行：
+> ```bash
+> bash restart-dsh-web.sh          # 自动重启 DSH Web
+> bash restart-dsh-web.sh -n       # 先预览将执行的命令（dry-run）
+> ```
+
 ### 方式一：从 npm 安装（推荐）
 
 ```bash
 dsh plugin --profile web add dsh-history@latest
 ```
 
-装完**硬刷新浏览器**（Cmd/Ctrl+Shift+R）即可看到效果（DSH 对 client 改动热加载，无需重启；仅 host 半更新时需要重启）。每个会话输入框上方自动出现 **"我的消息 (N)"**，无需手动操作。
+装完后运行 `bash restart-dsh-web.sh` 自动重启服务（或硬刷新浏览器 Cmd/Ctrl+Shift+R）。每个会话输入框上方自动出现 **"我的消息 (N)"**，无需手动操作。
 
 ### 方式二：直接从 GitHub 安装（无需等待 npm 发布）
 
@@ -33,7 +51,7 @@ dsh plugin --profile web add github:chenproton/dsh-history#main
 dsh plugin --profile web add https://github.com/chenproton/dsh-history.git#main
 ```
 
-装完硬刷新浏览器即可。此方式直接使用仓库已提交的构建产物，无需本地构建。
+装完后同样运行 `bash restart-dsh-web.sh`（或硬刷新浏览器）。此方式直接使用仓库已提交的构建产物，无需本地构建。
 
 ### 更新（npm / GitHub 通道通用）
 
@@ -44,7 +62,7 @@ dsh plugin --profile web update dsh-history            # pnpm 语义更新
 # GitHub 通道则重跑方式二的命令
 ```
 
-也可把 `~/.dsh/profiles/web/package.json` 里的版本号改高后 `pnpm install`。改完硬刷新浏览器即可（client 改动无需重启 DSH）。
+也可把 `~/.dsh/profiles/web/package.json` 里的版本号改高后 `pnpm install`。改完运行 `bash restart-dsh-web.sh` 或硬刷新浏览器即可。
 
 ---
 
@@ -71,12 +89,12 @@ cd ~/Code/dsh-history && pnpm install && pnpm build
 # 4. 在 profile 目录安装
 cd ~/.dsh/profiles/web && pnpm install
 
-# 5. 硬刷新浏览器即可看到效果
+# 5. 运行 bash restart-dsh-web.sh 自动重启生效（或硬刷新浏览器）
 ```
 
-**更新**：`git pull && pnpm install && pnpm build` → 硬刷新浏览器（client 改动热加载生效，无需重启 DSH；host 半改动才需重启）。
+**更新**：`git pull && pnpm install && pnpm build` → `bash restart-dsh-web.sh`（client 改动热加载生效，无需重启 DSH；host 半改动才需重启）。
 
-**切回 npm 通道**：把依赖改回 `"dsh-history": "^0.1.8"` 再 `pnpm install`，并移除手动挂载行（避免双挂载）。
+**切回 npm 通道**：把依赖改回 `"dsh-history": "^0.1.10"` 再 `pnpm install`，并移除手动挂载行（避免双挂载）。
 
 ### 通过 plugin-registry 安装（可选，与上述二选一）
 
@@ -88,9 +106,10 @@ pnpm install && pnpm build
 node scripts/package-registry.mjs      # 组装 registry/ 暂存（含清单 + 产物 + README，不入库）
 dsh registry install ./registry        # 安装（默认禁用）
 dsh registry enable dsh-external/dsh-history
+bash restart-dsh-web.sh                # 自动重启生效
 ```
 
-**更新**：`git pull && pnpm install && pnpm build` → `node scripts/package-registry.mjs` → `dsh registry uninstall/install/enable`。切换通道前先移除另一通道的挂载。
+**更新**：`git pull && pnpm install && pnpm build` → `node scripts/package-registry.mjs` → `dsh registry uninstall/install/enable` → `bash restart-dsh-web.sh`。切换通道前先移除另一通道的挂载。
 
 ---
 
@@ -105,6 +124,12 @@ dsh registry enable dsh-external/dsh-history
 4. 每行右侧 `⧉` 复制按钮一键复制完整文本（成功变 `✓`，1.4 秒后自动恢复）。
 
 ## 版本更新记录
+
+### v0.1.11
+
+- 新增配套脚本 **`restart-dsh-web.sh`**：安装/更新插件后一键自动重启 DSH Web 生效。
+  自动探测部署方式（systemd 服务 / 裸进程原样重启 / 直接启动），支持 `-n` 预览、
+  `-p` 指定 PID、`-l` 指定日志；四种安装方式均已接入该脚本的使用说明。
 
 ### v0.1.9
 

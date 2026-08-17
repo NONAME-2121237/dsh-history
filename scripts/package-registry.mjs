@@ -30,6 +30,7 @@ const files = [
   'dsh.plugin.json',
   'lib/index.mjs',
   'lib/client-registry.js',
+  'restart-dsh-web.sh',
   'README.md',
   'LICENSE',
 ]
