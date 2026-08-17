@@ -179,6 +179,10 @@ const PREFETCH_CACHE_MAX = 20
  *  guards against pathological loops if the host keeps reporting hasMore. */
 const MAX_AUTO_LOAD_PAGES = 30
 
+/** Cap on DOM-wait retries when a target's row is loaded but not yet
+ *  committed to the DOM (React render lag). 10 × 150ms ≈ 1.5s. */
+const MAX_LOCATE_RETRIES = 10
+
 /** Cap on rendered rows: an enormous history would otherwise render
  *  hundreds of DOM nodes; show the newest N and a hint. */
 const MAX_RENDERED_ROWS = 200
@@ -373,6 +377,7 @@ function HistoryDock(props: HistoryDockProps & {
   const [hostState, setHostState] = useState<'idle' | 'loading' | 'loaded' | 'error' | 'fallback'>('idle')
   const [hostError, setHostError] = useState<string | null>(null)
   const [pendingSeq, setPendingSeq] = useState<number | null>(null)
+  const [pendingRetry, setPendingRetry] = useState(0)
   const [copiedSeq, setCopiedSeq] = useState<number | null>(null)
   const [loadFailed, setLoadFailed] = useState(false)
   const [retryToken, setRetryToken] = useState(0)
@@ -408,6 +413,7 @@ function HistoryDock(props: HistoryDockProps & {
     let cancelled = false
     setNotice(null)
     setPendingSeq(null)
+    setPendingRetry(0)
     setLoadFailed(false)
     setAutoLoadPages(0)
     const sid = String(sessionId)
@@ -459,26 +465,50 @@ function HistoryDock(props: HistoryDockProps & {
     return items.filter((it) => it.text.toLowerCase().indexOf(q) !== -1)
   }, [items, query])
 
-  // Auto-load earlier history until the pending target lands in the window.
+  // Auto-locate a target message: page-load earlier history until the node
+  // lands in the loaded window, then wait (with retries) for the DOM row to
+  // actually render, then smooth-scroll + flash and close the panel. The
+  // retry loop covers the render lag between the snapshot update and the
+  // React commit that materializes the anchor element.
   useEffect(() => {
     if (pendingSeq === null) return
     if (!session || !session.chat) return
-    if (local.keys.has(pendingSeq)) {
-      const it = items.find((x) => x.seq === pendingSeq)
-      if (it && it.key) {
-        const ok = scrollToKey(it.key)
+    const key = local.keys.get(pendingSeq)
+    if (key !== undefined) {
+      // Node is loaded. Wait for its DOM row (it may not be committed yet).
+      if (findAnchor(key) !== null) {
+        const ok = scrollToKey(key)
         if (ok) {
           setOpen(false)
           setQuery('')
           setNotice(null)
         } else {
-          setNotice('该消息已加载但当前视图不可见，无法滚动定位。')
+          // Element exists but the scroll refused; keep the panel open and
+          // let the user retry — rare, but never silently fail.
+          setNotice('已定位到该消息，但页面滚动未生效，请再点击一次。')
         }
+        setPendingSeq(null)
+        setAutoLoadPages(0)
+        setPendingRetry(0)
+        return
       }
-      setPendingSeq(null)
-      setAutoLoadPages(0)
+      if (pendingRetry >= MAX_LOCATE_RETRIES) {
+        setPendingSeq(null)
+        setAutoLoadPages(0)
+        setPendingRetry(0)
+        setNotice('该消息正在渲染中，暂时无法定位。请稍候再试。')
+        return
+      }
+      setNotice('正在定位该消息…')
+      if (typeof timeout === 'function') {
+        timeout(() => setPendingRetry((n) => n + 1), 150)
+      } else {
+        // No timer service: retry on the next render cycle instead.
+        setPendingRetry((n) => n + 1)
+      }
       return
     }
+    // Node not loaded yet: page-load earlier history.
     if (loadFailed) return
     if (autoLoadPages >= MAX_AUTO_LOAD_PAGES) {
       setLoadFailed(true)
@@ -490,7 +520,8 @@ function HistoryDock(props: HistoryDockProps & {
         const p = loadOlderFor?.(String(sessionId))
         if (p && typeof p.then === 'function') {
           setAutoLoadPages((n) => n + 1)
-          p.catch(() => {
+          setNotice('正在加载更早历史以定位该消息…')
+          p.then(() => setPendingRetry((n) => n + 1)).catch(() => {
             setLoadFailed(true)
             setNotice('加载更早历史失败，无法定位该消息。')
           })
@@ -503,29 +534,35 @@ function HistoryDock(props: HistoryDockProps & {
       setLoadFailed(true)
       setNotice('已加载到该会话最早的记录，仍未找到这条消息（可能已被删除）。')
     }
-  }, [pendingSeq, local.keys, items, loadFailed, session, sessionId, loadOlderFor, autoLoadPages])
+  }, [pendingSeq, local.keys, loadFailed, session, sessionId, loadOlderFor, autoLoadPages, pendingRetry, timeout])
 
   const jumpTo = (it: HistoryRow): void => {
+    if (pendingSeq === it.seq) return
     if (it.key) {
-      if (scrollToKey(it.key)) {
+      // Already in the loaded window: scroll now, or wait for the DOM row to
+      // render if the commit lags (the effect above handles the wait loop).
+      if (findAnchor(it.key) !== null && scrollToKey(it.key)) {
         setOpen(false)
         setQuery('')
         setNotice(null)
         return
       }
-      // The message is in the loaded window (we have its anchor key) but the
-      // DOM row is not currently rendered/scrollable — tell the user why.
-      setNotice('这条消息已在当前会话中，但页面尚未渲染到该位置，暂时无法滚动定位。可先向上滚动加载更早内容，或稍后重试。')
+      setNotice('正在定位该消息…')
+      setPendingSeq(it.seq)
+      setPendingRetry(0)
+      setLoadFailed(false)
+      setAutoLoadPages(0)
       return
     }
-    if (pendingSeq === it.seq) return
     if (typeof loadOlderFor !== 'function') {
       setNotice('这条消息位于更早的历史中，尚未加载到当前对话窗口。当前环境无法自动加载更早历史，可先向上滚动加载。')
       return
     }
-    setNotice('正在向上加载更早历史以定位该消息…')
+    setNotice('正在加载更早历史以定位该消息…')
     setPendingSeq(it.seq)
+    setPendingRetry(0)
     setLoadFailed(false)
+    setAutoLoadPages(0)
   }
 
   const doCopy = (it: HistoryRow, e: { stopPropagation(): void }): void => {
@@ -608,7 +645,7 @@ function HistoryDock(props: HistoryDockProps & {
         const pending = pendingSeq === it.seq
         const copied = copiedSeq === it.seq
         const tagClass = pending ? 'dshm_tagPending' : (it.key ? 'dshm_tagLoaded' : 'dshm_tag')
-        const tagText = pending ? '加载中…' : (it.key ? '可定位' : '未加载')
+        const tagText = pending ? '定位中…' : (it.key ? '可定位' : '未加载')
         return createElement('li', {
           key: `m${it.seq}`,
           className: 'dshm_row',
