@@ -106,6 +106,12 @@ dsh registry enable dsh-external/dsh-history
 
 ## 版本更新记录
 
+### v0.1.9
+
+- 安装方式扩展：新增 **GitHub 直装**、**源码 link 安装**、**plugin-registry** 三种
+  通道（含 `scripts/package-registry.mjs` 组装脚本与 registry 专用 client bundle）；
+- README 重构为完整安装矩阵（npm / GitHub / 源码 / registry）+ 更新说明 + FAQ。
+
 ### v0.1.7
 
 - 体验：点击消息后**全自动定位**——节点未加载则自动加载更早历史；
