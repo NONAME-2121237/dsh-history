@@ -29,7 +29,7 @@ interface HistorySlotsService {
     }, component: (props: HistoryDockProps) => ReactElement): () => void;
 }
 /** The client sessions service face (structural subset used here). */
-interface HistorySessionsService {
+interface ClientSessionsService {
     binding(id: string): {
         session: {
             loadOlder(): Promise<void>;
@@ -76,7 +76,7 @@ interface HistoryTimer {
 declare module 'cordis' {
     interface Context {
         slots: HistorySlotsService;
-        sessions?: HistorySessionsService;
+        sessions?: ClientSessionsService;
         timer?: HistoryTimer;
     }
 }

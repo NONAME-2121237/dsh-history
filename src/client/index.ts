@@ -32,7 +32,7 @@ interface HistorySlotsService {
 }
 
 /** The client sessions service face (structural subset used here). */
-interface HistorySessionsService {
+interface ClientSessionsService {
   binding(id: string): {
     session: { loadOlder(): Promise<void> }
   } | undefined
@@ -98,7 +98,7 @@ interface HistoryTimer {
 declare module 'cordis' {
   interface Context {
     slots: HistorySlotsService
-    sessions?: HistorySessionsService
+    sessions?: ClientSessionsService
     timer?: HistoryTimer
   }
 }
@@ -129,7 +129,7 @@ const CSS = `
 .dshm_tagLoaded{flex:none;color:var(--dsw-alias-state-success-primary);font-size:11px;line-height:18px;white-space:nowrap}
 .dshm_tagPending{flex:none;color:var(--dsw-alias-state-warn-primary);font-size:11px;line-height:18px;white-space:nowrap}
 .dshm_empty{color:var(--dsw-alias-label-tertiary);padding:8px;font-size:13px;line-height:20px}
-.dshm_notice{color:var(--dsw-alias-state-warn-primary);padding:4px 12px 8px;font-size:12px;line-height:18px}
+.dshm_notice{color:var(--dsw-alias-state-warn-primary);background:var(--dsw-alias-state-warn-tertiary);border-radius:8px;margin:8px 8px 0;padding:6px 10px;font-size:12px;line-height:18px}
 .dshm_loading{color:var(--dsw-alias-label-caption);padding:8px;font-size:12px;line-height:18px}
 .dshm_error{color:var(--dsw-alias-state-error-primary);padding:8px;font-size:12px;line-height:18px}
 .dshm_retry{height:24px;color:var(--dsw-alias-state-error-primary);cursor:pointer;background:var(--dsw-alias-interactive-bg-hover-danger);border:none;border-radius:6px;margin-left:8px;padding:0 10px;font-size:12px;line-height:20px;vertical-align:middle}
@@ -169,7 +169,7 @@ const PREFETCH_TTL = 10000
 
 /** Full-history fetch timeout (ms): a hung host route must not pin the panel
  *  in "loading" forever — we fall back to the local window list. */
-const FETCH_TIMEOUT = 8000
+const FETCH_TIMEOUT = 15000
 
 /** Cap on the module-level prefetch cache size: evict oldest-first so a
  *  long-lived page switching many sessions cannot grow it unboundedly. */
@@ -319,16 +319,35 @@ function localWindowItems(session: HistoryConversationSnapshot | undefined): {
   return { items, keys }
 }
 
-/** Smooth-scroll to a message row and flash-highlight it. */
+/** Smooth-scroll to a message row and flash-highlight it. Falls back to a
+ *  manual scrollTop when scrollIntoView refuses (element rendered but not
+ *  scrollable yet, reduced-motion oddities, etc.). */
 function scrollToKey(key: string): boolean {
   const el = findAnchor(key)
   if (!el) return false
   try {
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    // Flash highlight first so the target is unmistakable even if the
+    // smooth scroll does not visibly move (already-in-view case).
     el.classList.remove('dshm-flash')
     void el.offsetWidth
     el.classList.add('dshm-flash')
     el.addEventListener('animationend', () => el.classList.remove('dshm-flash'), { once: true })
+    try {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    } catch {
+      // scrollIntoView can throw in some embedded contexts; fall back to
+      // walking up to the scroll container.
+      let node: HTMLElement | null = el
+      while (node !== null && node.parentElement !== null) {
+        const parent: HTMLElement = node.parentElement
+        const overflow = getComputedStyle(parent).overflowY
+        if (overflow === 'auto' || overflow === 'scroll' || overflow === 'overlay') {
+          parent.scrollTop = Math.max(0, el.offsetTop - parent.clientHeight / 2)
+          break
+        }
+        node = parent
+      }
+    }
   } catch {
     return false
   }
@@ -494,7 +513,9 @@ function HistoryDock(props: HistoryDockProps & {
         setNotice(null)
         return
       }
-      setNotice('该消息当前不在 Chat 视图的已加载内容中，无法直接滚动定位。')
+      // The message is in the loaded window (we have its anchor key) but the
+      // DOM row is not currently rendered/scrollable — tell the user why.
+      setNotice('这条消息已在当前会话中，但页面尚未渲染到该位置，暂时无法滚动定位。可先向上滚动加载更早内容，或稍后重试。')
       return
     }
     if (pendingSeq === it.seq) return
@@ -565,6 +586,9 @@ function HistoryDock(props: HistoryDockProps & {
         onClick: () => setDesc(!desc),
       }, desc ? '最新在前' : '最早在前'),
     ]))
+    if (notice) {
+      panel.push(createElement('div', { key: 'notice', className: 'dshm_notice' }, notice))
+    }
     if (hostState === 'loading') {
       panel.push(createElement('div', { key: 'loading', className: 'dshm_loading' }, '正在读取完整历史…'))
     } else if (hostState === 'error') {
@@ -623,9 +647,6 @@ function HistoryDock(props: HistoryDockProps & {
     if (hostState === 'loaded' && Array.isArray(hostItems) && hostItems.length > items.length) {
       panel.push(createElement('div', { key: 'more', className: 'dshm_notice' }, `已显示全部 ${hostItems.length} 条你发送的消息；${hostItems.length - local.items.length} 条位于已加载窗口之外（点击可自动加载并定位，或先向上滚动加载）。`))
     }
-    if (notice) {
-      panel.push(createElement('div', { key: 'notice', className: 'dshm_notice' }, notice))
-    }
     children.push(createElement('div', { key: 'panel', className: 'dshm_panel' }, panel))
   }
 
@@ -645,7 +666,7 @@ export function apply(ctx: Context): void {
   ctx.effect(() => injectStyles(), 'dsh-history: stylesheet')
   const slots = ctx.get('slots') as HistorySlotsService | undefined
   if (slots === undefined) return
-  const sessions = ctx.get('sessions') as HistorySessionsService | undefined
+  const sessions = ctx.get('sessions') as ClientSessionsService | undefined
   const timer = ctx.get('timer') as HistoryTimer | undefined
   const timeout = timer?.timeout.bind(timer)
   const loadOlderFor = sessions === undefined

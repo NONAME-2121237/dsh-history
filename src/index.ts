@@ -32,6 +32,13 @@ interface HistorySessionQuery {
   }>
 }
 
+/** The live in-memory session store face: fast in-process log access. */
+interface HistorySessionStore {
+  get(id: string): {
+    events?: readonly HistorySessionEvent[]
+  } | undefined
+}
+
 /** One raw session-log event (structural subset used by the filter). */
 interface HistorySessionEvent {
   type?: string
@@ -191,6 +198,21 @@ async function listUserMessages(ctx: Context, payload: unknown): Promise<History
   if (cached !== undefined && Date.now() - cached.at < HISTORY_CACHE_TTL) {
     return { ok: true, items: cached.items }
   }
+  // Fast path: the session is live in this process — read its in-memory
+  // append-only log snapshot directly. No persistence read, no replay
+  // validation, no I/O: this is what makes repeat opens near-instant.
+  const sessions = ctx.get('sessions') as HistorySessionStore | undefined
+  const liveEvents = sessions?.get(sessionId)?.events
+  if (liveEvents !== undefined) {
+    const items = collectUserMessages(liveEvents)
+    if (historyCache.size >= HISTORY_CACHE_MAX) {
+      const oldest = historyCache.keys().next().value
+      if (oldest !== undefined) historyCache.delete(oldest)
+    }
+    historyCache.set(sessionId, { at: Date.now(), items })
+    return { ok: true, items }
+  }
+  // Slow path: the session is not live here (detached/persisted only).
   const sessionQuery = ctx.get('sessionQuery') as HistorySessionQuery | undefined
   if (sessionQuery === undefined) {
     return { ok: false, error: 'sessionQuery 服务不可用' }
@@ -198,18 +220,7 @@ async function listUserMessages(ctx: Context, payload: unknown): Promise<History
   try {
     const snapshot = await sessionQuery.readSession(sessionId)
     const events = snapshot && Array.isArray(snapshot.events) ? snapshot.events : []
-    const items: { seq: number; time: number; text: string }[] = []
-    for (const ev of events) {
-      if (!ev || ev.type !== 'user/message') continue
-      const source = ev.data?.source
-      if (!source || source.kind !== 'user') continue
-      items.push({
-        seq: typeof ev.seq === 'number' ? ev.seq : 0,
-        time: typeof ev.time === 'number' ? ev.time : 0,
-        text: textOf(ev.data?.content),
-      })
-    }
-    items.sort((a, b) => a.seq - b.seq)
+    const items = collectUserMessages(events)
     if (historyCache.size >= HISTORY_CACHE_MAX) {
       const oldest = historyCache.keys().next().value
       if (oldest !== undefined) historyCache.delete(oldest)
@@ -219,6 +230,23 @@ async function listUserMessages(ctx: Context, payload: unknown): Promise<History
   } catch (err) {
     return { ok: false, error: String(err instanceof Error ? err.message : err) }
   }
+}
+
+/** Filter one event list down to human-sent user messages, seq-ascending. */
+function collectUserMessages(events: readonly HistorySessionEvent[]): { seq: number; time: number; text: string }[] {
+  const items: { seq: number; time: number; text: string }[] = []
+  for (const ev of events) {
+    if (!ev || ev.type !== 'user/message') continue
+    const source = ev.data?.source
+    if (!source || source.kind !== 'user') continue
+    items.push({
+      seq: typeof ev.seq === 'number' ? ev.seq : 0,
+      time: typeof ev.time === 'number' ? ev.time : 0,
+      text: textOf(ev.data?.content),
+    })
+  }
+  items.sort((a, b) => a.seq - b.seq)
+  return items
 }
 
 /** Write a JSON response with the given status. */

@@ -1,6 +1,6 @@
 {
   "name": "dsh-history",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "DSH web plugin: quickly view, search, and jump to all messages YOU sent in a long conversation. Lists the full history (including not-yet-loaded pages), auto-loads earlier history on demand, smooth-scrolls and flashes the target message, sorts newest-first with a toggle, and copies message text with one click.",
   "type": "module",
   "repository": {
