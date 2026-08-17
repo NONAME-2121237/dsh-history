@@ -45,24 +45,63 @@ if [ -z "$TARGET_PID" ] && command -v systemctl >/dev/null 2>&1 \
   && systemctl list-unit-files 2>/dev/null | grep -q '^dsh-web.service'; then
   if [ "$DRY" -eq 1 ]; then
     echo "[systemd] 将执行: systemctl restart dsh-web.service"
+    echo "[systemd] （若检测到残留 dsh web 占用端口，将自动清理后再重启）"
     exit 0
   fi
-  # 端口预检：重启前先确认 12608 没有被非 systemd 托管的进程占用
-  # （旧的手动 dsh web / nohup 残留会抢端口，导致新进程 EADDRINUSE 崩溃）。
+  # 确定服务监听的端口（从 ExecStart 提取 --port，缺省 12608）
   PORT_CHECK="12608"
   SERVICE_CMD="$(systemctl show dsh-web.service -p ExecStart --value 2>/dev/null)"
   PORT_CHECK="$(echo "$SERVICE_CMD" | sed -n 's/.*--port[= ]\([0-9]*\).*/\1/p' | head -1)"
   [ -n "$PORT_CHECK" ] || PORT_CHECK="12608"
-  PORT_OWNER="$(ss -ltnp 2>/dev/null | grep ":$PORT_CHECK " | grep -v "pid=$(systemctl show dsh-web.service -p MainPID --value 2>/dev/null)" | head -3 || true)"
-  if [ -n "$PORT_OWNER" ]; then
-    echo "[警告] 端口 ${PORT_CHECK} 已被其他进程占用（非当前 systemd 服务）:" >&2
-    echo "$PORT_OWNER" >&2
-    echo "  这会导致重启后 dsh web 因 EADDRINUSE 崩溃。" >&2
-    echo "  处置: 确认该进程是残留的旧 dsh web 后，先停止它再重启，例如:" >&2
-    echo "    kill <占用进程 PID>" >&2
-    echo "  （若不确定占用者，先执行: ss -ltnp | grep :${PORT_CHECK} 查看）" >&2
-    echo "  继续尝试重启 ..." >&2
-  fi
+  # 自动清理端口占用：反复扫描，把所有"占用该端口且确认为残留 dsh web"的
+  # 进程逐一终止（先 TERM 再 KILL）。占用者若不是 dsh web（如其他服务），
+  # 不误杀，直接警告退出。
+  SERVICE_PID="$(systemctl show dsh-web.service -p MainPID --value 2>/dev/null)"
+  CLEAN_ROUND=0
+  while [ "$CLEAN_ROUND" -lt 3 ]; do
+    # 收集当前端口占用者（排除 systemd 服务自身的 PID）
+    OWNERS="$(ss -ltnp 2>/dev/null | grep ":$PORT_CHECK " | grep -oP 'pid=\K[0-9]+' | sort -u)"
+    FOUND_NON_DSH=""
+    CLEANED_ANY=0
+    for OPID in $OWNERS; do
+      [ -n "$OPID" ] || continue
+      [ "$OPID" = "$SERVICE_PID" ] && continue
+      OPID_CMD="$(tr '\0' ' ' < "/proc/$OPID/cmdline" 2>/dev/null)"
+      if echo "$OPID_CMD" | grep -q "dsh" && echo " $OPID_CMD " | grep -q " web "; then
+        echo "[清理] 检测到残留 dsh web 进程 PID=$OPID 占用端口 ${PORT_CHECK}，自动停止 ..."
+        if [ "$CLEAN_ROUND" -eq 0 ]; then
+          # 先停止 systemd 服务，避免其 Restart=always 与清理竞争
+          systemctl stop dsh-web.service 2>/dev/null || true
+        fi
+        kill "$OPID" 2>/dev/null
+        i=0
+        while kill -0 "$OPID" 2>/dev/null && [ $i -lt 20 ]; do
+          sleep 0.5
+          i=$((i+1))
+        done
+        if kill -0 "$OPID" 2>/dev/null; then
+          echo "  PID=$OPID 未退出，强制结束 ..."
+          kill -9 "$OPID" 2>/dev/null
+          sleep 1
+        fi
+        CLEANED_ANY=1
+      else
+        FOUND_NON_DSH="${FOUND_NON_DSH} ${OPID}(${OPID_CMD})"
+      fi
+    done
+    if [ "$CLEANED_ANY" -eq 0 ]; then
+      # 没有可清理的 dsh 残留了
+      if [ -n "$FOUND_NON_DSH" ]; then
+        echo "[警告] 端口 ${PORT_CHECK} 被非 dsh 进程占用，无法自动清理，请手动处理:" >&2
+        echo "  占用者:${FOUND_NON_DSH}" >&2
+        echo "  参考: ss -ltnp | grep :${PORT_CHECK}" >&2
+        exit 1
+      fi
+      break
+    fi
+    CLEAN_ROUND=$((CLEAN_ROUND + 1))
+    sleep 1
+  done
   echo "[systemd] 重启 dsh-web.service ..."
   systemctl restart dsh-web.service || { echo "[错误] systemctl restart 失败" >&2; exit 1; }
   # 轮询等待激活（DSH web 冷启动可能超过 3 秒）
