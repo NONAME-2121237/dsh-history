@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build output
+lib/
+*.tgz
+
+# Registry staging (the plugin-registry channel, if used)
+registry/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
