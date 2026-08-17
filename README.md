@@ -22,18 +22,23 @@ DSH web 插件：在超长会话里**快速查看、搜索并跳转到所有"你
 > - 否则自动发现运行中的 `dsh web` 进程，读取原始启动参数原样重启（nohup）；
 > - 找不到进程时直接用 `dsh web` 启动。
 >
-> 获取脚本（任选其一）：
+> 脚本随 npm 包一起分发，**装完包后直接运行（无需下载）**：
 > ```bash
-> # 安装 npm 包后（脚本随包分发）
+> # 方式 A：直接用包内的脚本（推荐，路径固定）
+> bash ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh
+>
+> # 方式 B：拷贝到常用位置后运行
 > cp ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh ~/restart-dsh-web.sh
-> # 或直接从仓库下载
+> bash ~/restart-dsh-web.sh
+>
+> # 方式 C：从仓库直接下载（未装 npm 包时）
 > curl -O https://raw.githubusercontent.com/chenproton/dsh-history/main/restart-dsh-web.sh
+> bash restart-dsh-web.sh
 > ```
-> 然后执行：
-> ```bash
-> bash restart-dsh-web.sh          # 自动重启 DSH Web
-> bash restart-dsh-web.sh -n       # 先预览将执行的命令（dry-run）
-> ```
+> 参数：`-n` 预览将执行的命令（dry-run）、`-p PID` 指定进程、`-l 文件` 指定日志。
+> 
+> > ℹ️ 安装时的 `✕ missing peer` 警告可安全忽略：DSH 运行时通过自身 module table
+> > 提供 `@deepseek-ai/*` 与 react 等依赖，无需在 profile 中重复安装。
 
 ### 方式一：从 npm 安装（推荐）
 
