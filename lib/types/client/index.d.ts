@@ -34,6 +34,21 @@ interface ClientSessionsService {
 /** Props the dock slot renders with. */
 interface HistoryDockProps {
     session?: HistoryConversationSnapshot;
+    /** Standard kit: the composer input state hook (per-session). */
+    useInput?: <T>(selector: (s: InputState) => T) => T;
+    /** Standard kit: the composer input action face. */
+    inputActions?: InputActions;
+}
+/** The composer input state slice this plugin reads (structural subset). */
+interface InputState {
+    readonly draft: string;
+    readonly phase: 'plain' | 'adjudicating' | 'claimed' | 'submitting';
+    /** Present exactly while claimed/submitting (a '/' or '@' trigger menu). */
+    readonly claim?: unknown;
+}
+/** The composer input action face (structural subset). */
+interface InputActions {
+    setDraft(text: string): void;
 }
 /** Timer service face (optional; used to auto-clear the copy feedback). */
 interface HistoryTimer {

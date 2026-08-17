@@ -10,7 +10,7 @@
  * - `ctx.timer` for the copy-feedback restore.
  * Pure helpers live in ./util.ts; this file only renders and manages state.
  */
-import { createElement, useEffect, useMemo, useState, type ReactElement } from 'react'
+import { createElement, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import type { Context } from 'cordis'
 import {
   type HistoryConversationSnapshot,
@@ -51,6 +51,23 @@ interface HistoryHostItem {
 /** Props the dock slot renders with. */
 interface HistoryDockProps {
   session?: HistoryConversationSnapshot
+  /** Standard kit: the composer input state hook (per-session). */
+  useInput?: <T>(selector: (s: InputState) => T) => T
+  /** Standard kit: the composer input action face. */
+  inputActions?: InputActions
+}
+
+/** The composer input state slice this plugin reads (structural subset). */
+interface InputState {
+  readonly draft: string
+  readonly phase: 'plain' | 'adjudicating' | 'claimed' | 'submitting'
+  /** Present exactly while claimed/submitting (a '/' or '@' trigger menu). */
+  readonly claim?: unknown
+}
+
+/** The composer input action face (structural subset). */
+interface InputActions {
+  setDraft(text: string): void
 }
 
 /** Timer service face (optional; used to auto-clear the copy feedback). */
@@ -98,6 +115,8 @@ const CSS = `
 .dshm_retry{height:24px;color:var(--dsw-alias-state-error-primary);cursor:pointer;background:var(--dsw-alias-interactive-bg-hover-danger);border:none;border-radius:6px;margin-left:8px;padding:0 10px;font-size:12px;line-height:20px;vertical-align:middle}
 .dshm_retry:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .dshm_flash{animation:dshmFlash 1.6s ease-out}
+.dshm_recall{box-sizing:border-box;width:100%;max-width:calc(var(--dsh-composer-card-max-width) - var(--dsh-composer-dock-inset) * 2);height:26px;color:var(--dsw-alias-label-tertiary);margin:0 auto;padding:0 var(--dsh-composer-dock-inset);align-items:center;justify-content:center;gap:6px;font-size:12px;line-height:18px;user-select:none;display:flex}
+.dshm_recallGlyph{opacity:.75}
 @keyframes dshmFlash{0%,25%{box-shadow:0 0 0 3px var(--dsw-alias-state-business-primary)}100%{box-shadow:0 0 0 3px transparent}}
 @media (prefers-reduced-motion:reduce){.dshm_flash{animation:none}}
 `
@@ -178,6 +197,8 @@ function HistoryDock(props: HistoryDockProps & {
   const sessionId = session?.sessionId
   const loadOlderFor = props.loadOlderFor
   const timeout = props.timeout
+  const useInput = props.useInput
+  const inputActions = props.inputActions
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [notice, setNotice] = useState<string | null>(null)
@@ -191,6 +212,9 @@ function HistoryDock(props: HistoryDockProps & {
   const [loadFailed, setLoadFailed] = useState(false)
   const [retryToken, setRetryToken] = useState(0)
   const [autoLoadPages, setAutoLoadPages] = useState(0)
+  // ↑/↓ recall: cursor -1 = live draft; >=0 = browsing history entries.
+  const [recallCursor, setRecallCursor] = useState(-1)
+  const [recallStaging, setRecallStaging] = useState('')
 
   const local = useMemo(() => collectWindowItems(session), [session])
 
@@ -252,6 +276,107 @@ function HistoryDock(props: HistoryDockProps & {
     if (!q) return items
     return items.filter((it) => it.text.toLowerCase().indexOf(q) !== -1)
   }, [items, query])
+
+  // ↑/↓ recall: with the composer focused and no trigger menu / IME / busy
+  // state, ↑ steps back through the messages you sent (oldest→newest from the
+  // most recent), ↓ steps forward, and the recalled line lands in the draft
+  // for editing + Enter to re-send. Uses the same full-history `items` (which
+  // includes not-yet-loaded pages), so recall reaches further than the loaded
+  // window. Falls back to native behavior otherwise.
+  const recallEntries = useMemo<string[]>(() => {
+    const list: string[] = []
+    for (const it of items) {
+      const t = it.text.trim()
+      if (t === '') continue
+      if (list[list.length - 1] === t) continue // collapse consecutive dupes
+      list.push(t)
+    }
+    return list
+  }, [items])
+
+  // useInput is a stable hook from the standard kit; call it unconditionally
+  // (the hook-order rule) and only read its value when it exists.
+  const inputSnapshot = useInput !== undefined
+    ? useInput((s: InputState) => s)
+    : undefined
+
+  // Keep the latest input facts in a ref so the long-lived keydown listener
+  // never needs re-binding on every keystroke.
+  const inputRef = useRef<InputState | undefined>(undefined)
+  inputRef.current = inputSnapshot
+  const cursorRef = useRef(recallCursor)
+  cursorRef.current = recallCursor
+  const stagingRef = useRef(recallStaging)
+  stagingRef.current = recallStaging
+  const entriesRef = useRef(recallEntries)
+  entriesRef.current = recallEntries
+
+  useEffect(() => {
+    if (inputActions === undefined) return
+    if (recallEntries.length === 0) return
+    let cancelled = false
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (cancelled) return
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+      // IME composition (Chinese input) keeps its own arrows.
+      if (event.isComposing || event.keyCode === 229) return
+      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
+      const target = event.target
+      if (!(target instanceof HTMLElement)) return
+      if (target.closest('[data-composer-card]') === null) return
+      const live = inputRef.current
+      if (live === undefined) return
+      // A '/' or '@' trigger menu is open, or the composer is busy: leave arrows.
+      if (live.claim !== undefined) return
+      if (live.phase === 'adjudicating' || live.phase === 'submitting') return
+
+      const entries = entriesRef.current
+      let cursor = cursorRef.current
+      let next: string | null = null
+      if (event.key === 'ArrowUp') {
+        if (cursor === -1) {
+          stagingRef.current = live.draft
+          setRecallStaging(live.draft)
+          cursor = entries.length - 1
+          next = entries[cursor]
+        } else if (cursor > 0) {
+          cursor -= 1
+          next = entries[cursor]
+        } else {
+          return // oldest entry — native behavior
+        }
+      } else {
+        if (cursor === -1) return // live draft — native behavior
+        if (cursor < entries.length - 1) {
+          cursor += 1
+          next = entries[cursor]
+        } else {
+          cursor = -1
+          next = stagingRef.current
+        }
+      }
+      cursorRef.current = cursor
+      setRecallCursor(cursor)
+      event.preventDefault()
+      event.stopPropagation()
+      inputActions.setDraft(next === null ? '' : next)
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      cancelled = true
+      document.removeEventListener('keydown', onKeyDown, true)
+    }
+  }, [inputActions, recallEntries.length])
+
+  // Typing after a recall returns to the live position (edited text becomes
+  // the new staging draft).
+  const draft = inputSnapshot?.draft ?? ''
+  useEffect(() => {
+    if (recallCursor >= 0 && recallEntries[recallCursor] !== undefined && draft !== recallEntries[recallCursor]) {
+      setRecallCursor(-1)
+      setRecallStaging(draft)
+    }
+  }, [draft, recallCursor, recallEntries])
 
   // Auto-locate a target: page-load earlier history until the node lands in the
   // loaded window, then wait for its DOM row to render, then scroll + close.
@@ -346,6 +471,16 @@ function HistoryDock(props: HistoryDockProps & {
   }, [open])
 
   const children: ReactElement[] = []
+  if (recallCursor >= 0 && recallEntries.length > 0) {
+    children.push(createElement('div', {
+      key: 'recall',
+      className: 'dshm_recall',
+      'aria-live': 'polite',
+    }, [
+      createElement('span', { key: 'glyph', className: 'dshm_recallGlyph' }, '↑↓'),
+      createElement('span', { key: 'pos' }, `history ${recallCursor + 1}/${recallEntries.length}`),
+    ]))
+  }
   children.push(createElement('button', {
     key: 'trigger',
     type: 'button',
@@ -469,6 +604,12 @@ export function apply(ctx: Context): void {
     }
   slots.inject('conversation.input.dock', () => slots.register(
     { name: 'conversation.input.dock', id: 'dsh-history', order: 30 },
-    (props: HistoryDockProps) => createElement(HistoryDock, { session: props.session, loadOlderFor, timeout }),
+    (props: HistoryDockProps & { useInput?: unknown; inputActions?: unknown }) => createElement(HistoryDock, {
+      session: props.session,
+      loadOlderFor,
+      timeout,
+      useInput: props.useInput as HistoryDockProps['useInput'],
+      inputActions: props.inputActions as HistoryDockProps['inputActions'],
+    }),
   ))
 }
