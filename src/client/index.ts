@@ -323,39 +323,55 @@ function localWindowItems(session: HistoryConversationSnapshot | undefined): {
   return { items, keys }
 }
 
-/** Smooth-scroll to a message row and flash-highlight it. Falls back to a
- *  manual scrollTop when scrollIntoView refuses (element rendered but not
- *  scrollable yet, reduced-motion oddities, etc.). */
+/** Scroll a message row into view (centered) and flash-highlight it.
+ *  Prefers direct scrollport positioning via getBoundingClientRect — this is
+ *  synchronous and reliable even while the dock panel is open, unlike
+ *  scrollIntoView({behavior:'smooth'}) which is async and can silently no-op
+ *  or be cancelled by a layout change that happens right after the click. */
 function scrollToKey(key: string): boolean {
   const el = findAnchor(key)
   if (!el) return false
   try {
-    // Flash highlight first so the target is unmistakable even if the
-    // smooth scroll does not visibly move (already-in-view case).
+    // Flash highlight first so the target is unmistakable.
     el.classList.remove('dshm-flash')
     void el.offsetWidth
     el.classList.add('dshm-flash')
     el.addEventListener('animationend', () => el.classList.remove('dshm-flash'), { once: true })
+
+    // Find the nearest scrollable ancestor (the conversation scrollport).
+    let port: HTMLElement | null = null
+    let node: HTMLElement | null = el.parentElement
+    while (node !== null) {
+      const overflow = getComputedStyle(node).overflowY
+      if (overflow === 'auto' || overflow === 'scroll' || overflow === 'overlay') {
+        port = node
+        break
+      }
+      node = node.parentElement
+    }
+
+    if (port !== null) {
+      // Center the target within the scrollport using viewport-relative
+      // coords so we are independent of any offsetParent along the way.
+      const elRect = el.getBoundingClientRect()
+      const portRect = port.getBoundingClientRect()
+      const target = port.scrollTop + elRect.top - portRect.top - portRect.height / 2 + elRect.height / 2
+      if (Math.abs(target - port.scrollTop) > 1) {
+        port.scrollTop = target
+      }
+      return true
+    }
+
+    // No scrollport found (unlikely): fall back to native scrollIntoView.
     try {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' })
     } catch {
-      // scrollIntoView can throw in some embedded contexts; fall back to
-      // walking up to the scroll container.
-      let node: HTMLElement | null = el
-      while (node !== null && node.parentElement !== null) {
-        const parent: HTMLElement = node.parentElement
-        const overflow = getComputedStyle(parent).overflowY
-        if (overflow === 'auto' || overflow === 'scroll' || overflow === 'overlay') {
-          parent.scrollTop = Math.max(0, el.offsetTop - parent.clientHeight / 2)
-          break
-        }
-        node = parent
-      }
+      return false
     }
+    return true
   } catch {
     return false
   }
-  return true
 }
 
 /** ------------------------------------------------------------------ view */
