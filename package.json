@@ -52,8 +52,7 @@
     "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
     "prepublishOnly": "pnpm build",
     "typecheck": "tsc --noEmit",
-    "bundle": "tsdown",
-    "prepare": "tsdown"
+    "bundle": "tsdown"
   },
   "license": "MIT",
   "peerDependencies": {

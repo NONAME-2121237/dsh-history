@@ -2,7 +2,7 @@
 node_modules/
 
 # Build output
-lib/
+# lib/ is committed so git-install works without a build step
 *.tgz
 
 # Registry staging (the plugin-registry channel, if used)
