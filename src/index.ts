@@ -79,6 +79,19 @@ export const inject = ['webServer', 'webRuntime']
 /** Body size bound of one JSON request (defense against unbounded reads). */
 const MAX_BODY_BYTES = 1 << 20
 
+/** Per-session full-history cache TTL (ms): fast repeat opens, short enough
+ *  that new messages surface within a few seconds. */
+const HISTORY_CACHE_TTL = 5000
+
+/** One cached full-history payload per session. */
+interface HistoryCacheEntry {
+  at: number
+  items: { seq: number; time: number; text: string }[]
+}
+
+/** module-level cache: keyed by sessionId, shared across requests. */
+const historyCache = new Map<string, HistoryCacheEntry>()
+
 /** Normalize a Host-header authority, or undefined when unparsable. */
 function parseAuthority(authority: string): URL | undefined {
   try {
@@ -168,6 +181,12 @@ async function listUserMessages(ctx: Context, payload: unknown): Promise<History
   if (typeof sessionId !== 'string' || sessionId === '') {
     return { ok: false, error: '缺少 sessionId' }
   }
+  // Serve from the cache when fresh: repeat panel opens (and the client's
+  // prefetch) skip the full-log replay entirely.
+  const cached = historyCache.get(sessionId)
+  if (cached !== undefined && Date.now() - cached.at < HISTORY_CACHE_TTL) {
+    return { ok: true, items: cached.items }
+  }
   const sessionQuery = ctx.get('sessionQuery') as HistorySessionQuery | undefined
   if (sessionQuery === undefined) {
     return { ok: false, error: 'sessionQuery 服务不可用' }
@@ -187,6 +206,7 @@ async function listUserMessages(ctx: Context, payload: unknown): Promise<History
       })
     }
     items.sort((a, b) => a.seq - b.seq)
+    historyCache.set(sessionId, { at: Date.now(), items })
     return { ok: true, items }
   } catch (err) {
     return { ok: false, error: String(err instanceof Error ? err.message : err) }

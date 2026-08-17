@@ -147,6 +147,41 @@ function injectStyles(): () => void {
 
 /** ------------------------------------------------------------------ utils */
 
+/**
+ * module-level prefetch cache: sessionId → full-history items. The dock
+ * component prefetches on mount (every session renders its own dock), so
+ * opening the panel later reads this cache and renders instantly. A panel
+ * open with a stale/absent cache still fetches fresh and re-caches.
+ */
+const prefetchCache = new Map<string, { at: number; items: HistoryHostItem[] }>()
+
+/** Prefetch TTL (ms): a fresh prefetch is served immediately; older entries
+ *  are re-fetched on open so new messages surface. */
+const PREFETCH_TTL = 10000
+
+/** Fetch the full history for a session (network + re-cache). */
+function fetchFullHistory(sessionId: string): Promise<{ ok: boolean; items: HistoryHostItem[]; error?: string }> {
+  return fetch(`/history/api/list-user-messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId }),
+  })
+    .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+    .then((data: unknown) => {
+      const record = data as { ok?: boolean; items?: HistoryHostItem[]; error?: string }
+      if (record && record.ok === true && Array.isArray(record.items)) {
+        prefetchCache.set(sessionId, { at: Date.now(), items: record.items })
+        return { ok: true, items: record.items }
+      }
+      return { ok: false, items: [], error: record?.error ?? '读取完整历史失败' }
+    })
+    .catch((err: unknown) => ({
+      ok: false,
+      items: [],
+      error: String(err instanceof Error ? err.message : err),
+    }))
+}
+
 /** Flatten one message's content blocks to a single preview string. */
 function textOf(content: readonly HistoryContentBlock[] | undefined): string {
   if (!Array.isArray(content)) return ''
@@ -276,37 +311,66 @@ function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => 
 
   const local = useMemo(() => localWindowItems(session), [session])
 
-  // Fetch the full history when the panel opens.
+  // Prefetch the full history on mount (every session renders its own dock),
+  // so opening the panel later renders instantly from the cache. The panel
+  // re-fetches on open only when the prefetch is stale or absent.
   useEffect(() => {
-    if (!open) return
+    if (sessionId === undefined) return
     let cancelled = false
-    setHostState('loading')
-    setHostError(null)
-    setNotice(null)
-    setPendingSeq(null)
-    setLoadFailed(false)
-    fetch(`/history/api/list-user-messages`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId: String(sessionId) }),
-    })
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then((data: unknown) => {
+    if (!prefetchCache.has(String(sessionId))) {
+      fetchFullHistory(String(sessionId)).then((res) => {
         if (cancelled) return
-        const record = data as { ok?: boolean; items?: HistoryHostItem[]; error?: string }
-        if (record && record.ok === true && Array.isArray(record.items)) {
-          setHostItems(record.items)
+        if (res.ok) {
+          setHostItems(res.items)
           setHostState('loaded')
         } else {
           setHostState('error')
-          setHostError(record?.error ?? '读取完整历史失败')
+          setHostError(res.error ?? '读取完整历史失败')
         }
       })
-      .catch((err: unknown) => {
+    }
+    return () => { cancelled = true }
+  }, [sessionId])
+
+  // On panel open, seed from the prefetch cache immediately, then re-fetch
+  // if the cached entry is stale (or missing) so new messages appear.
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setNotice(null)
+    setPendingSeq(null)
+    setLoadFailed(false)
+    const sid = String(sessionId)
+    const cached = prefetchCache.get(sid)
+    if (cached !== undefined) {
+      setHostItems(cached.items)
+      setHostState('loaded')
+      if (Date.now() - cached.at < PREFETCH_TTL) return
+      // stale: re-fetch in the background; keep showing the cached list.
+      fetchFullHistory(sid).then((res) => {
         if (cancelled) return
-        setHostState('error')
-        setHostError(String(err instanceof Error ? err.message : err))
+        if (res.ok) {
+          setHostItems(res.items)
+          setHostState('loaded')
+        } else {
+          setHostState('error')
+          setHostError(res.error ?? '读取完整历史失败')
+        }
       })
+      return
+    }
+    setHostState('loading')
+    setHostError(null)
+    fetchFullHistory(sid).then((res) => {
+      if (cancelled) return
+      if (res.ok) {
+        setHostItems(res.items)
+        setHostState('loaded')
+      } else {
+        setHostState('error')
+        setHostError(res.error ?? '读取完整历史失败')
+      }
+    })
     return () => { cancelled = true }
   }, [open, sessionId])
 
