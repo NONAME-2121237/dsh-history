@@ -92,6 +92,10 @@ interface HistoryCacheEntry {
 /** module-level cache: keyed by sessionId, shared across requests. */
 const historyCache = new Map<string, HistoryCacheEntry>()
 
+/** Cache size cap: evict oldest-first so a long-lived server cannot grow the
+ *  map unboundedly across many sessions. */
+const HISTORY_CACHE_MAX = 50
+
 /** Normalize a Host-header authority, or undefined when unparsable. */
 function parseAuthority(authority: string): URL | undefined {
   try {
@@ -206,6 +210,10 @@ async function listUserMessages(ctx: Context, payload: unknown): Promise<History
       })
     }
     items.sort((a, b) => a.seq - b.seq)
+    if (historyCache.size >= HISTORY_CACHE_MAX) {
+      const oldest = historyCache.keys().next().value
+      if (oldest !== undefined) historyCache.delete(oldest)
+    }
     historyCache.set(sessionId, { at: Date.now(), items })
     return { ok: true, items }
   } catch (err) {

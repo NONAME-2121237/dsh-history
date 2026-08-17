@@ -90,10 +90,16 @@ interface HistoryDockProps {
   session?: HistoryConversationSnapshot
 }
 
+/** Timer service face (optional; used to auto-clear the copy feedback). */
+interface HistoryTimer {
+  timeout(callback: () => void, delay: number): () => void
+}
+
 declare module 'cordis' {
   interface Context {
     slots: HistorySlotsService
     sessions?: HistorySessionsService
+    timer?: HistoryTimer
   }
 }
 
@@ -126,6 +132,8 @@ const CSS = `
 .dshm_notice{color:var(--dsw-alias-state-warn-primary);padding:4px 12px 8px;font-size:12px;line-height:18px}
 .dshm_loading{color:var(--dsw-alias-label-caption);padding:8px;font-size:12px;line-height:18px}
 .dshm_error{color:var(--dsw-alias-state-error-primary);padding:8px;font-size:12px;line-height:18px}
+.dshm_retry{height:24px;color:var(--dsw-alias-state-error-primary);cursor:pointer;background:var(--dsw-alias-interactive-bg-hover-danger);border:none;border-radius:6px;margin-left:8px;padding:0 10px;font-size:12px;line-height:20px;vertical-align:middle}
+.dshm_retry:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .dshm_flash{animation:dshmFlash 1.6s ease-out}
 @keyframes dshmFlash{0%,25%{box-shadow:0 0 0 3px var(--dsw-alias-state-business-primary)}100%{box-shadow:0 0 0 3px transparent}}
 @media (prefers-reduced-motion:reduce){.dshm_flash{animation:none}}
@@ -159,17 +167,43 @@ const prefetchCache = new Map<string, { at: number; items: HistoryHostItem[] }>(
  *  are re-fetched on open so new messages surface. */
 const PREFETCH_TTL = 10000
 
-/** Fetch the full history for a session (network + re-cache). */
+/** Full-history fetch timeout (ms): a hung host route must not pin the panel
+ *  in "loading" forever — we fall back to the local window list. */
+const FETCH_TIMEOUT = 8000
+
+/** Cap on the module-level prefetch cache size: evict oldest-first so a
+ *  long-lived page switching many sessions cannot grow it unboundedly. */
+const PREFETCH_CACHE_MAX = 20
+
+/** Cap on sequential auto-load pages while hunting one target message:
+ *  guards against pathological loops if the host keeps reporting hasMore. */
+const MAX_AUTO_LOAD_PAGES = 30
+
+/** Cap on rendered rows: an enormous history would otherwise render
+ *  hundreds of DOM nodes; show the newest N and a hint. */
+const MAX_RENDERED_ROWS = 200
+
+/** Fetch the full history for a session (network + re-cache, with timeout). */
 function fetchFullHistory(sessionId: string): Promise<{ ok: boolean; items: HistoryHostItem[]; error?: string }> {
+  const controller = typeof AbortController === 'undefined' ? undefined : new AbortController()
+  const timer = controller !== undefined && typeof setTimeout === 'function'
+    ? setTimeout(() => { controller.abort() }, FETCH_TIMEOUT)
+    : undefined
   return fetch(`/history/api/list-user-messages`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ sessionId }),
+    signal: controller?.signal,
   })
     .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
     .then((data: unknown) => {
       const record = data as { ok?: boolean; items?: HistoryHostItem[]; error?: string }
       if (record && record.ok === true && Array.isArray(record.items)) {
+        // bounded cache: evict oldest entry when over the cap.
+        if (prefetchCache.size >= PREFETCH_CACHE_MAX) {
+          const oldest = prefetchCache.keys().next().value
+          if (oldest !== undefined) prefetchCache.delete(oldest)
+        }
         prefetchCache.set(sessionId, { at: Date.now(), items: record.items })
         return { ok: true, items: record.items }
       }
@@ -178,8 +212,11 @@ function fetchFullHistory(sessionId: string): Promise<{ ok: boolean; items: Hist
     .catch((err: unknown) => ({
       ok: false,
       items: [],
-      error: String(err instanceof Error ? err.message : err),
+      error: err instanceof DOMException && err.name === 'AbortError' ? '请求超时' : String(err instanceof Error ? err.message : err),
     }))
+    .finally(() => {
+      if (timer !== undefined) clearTimeout(timer)
+    })
 }
 
 /** Flatten one message's content blocks to a single preview string. */
@@ -194,13 +231,20 @@ function textOf(content: readonly HistoryContentBlock[] | undefined): string {
   return parts.join(' ').replace(/\s+/g, ' ').trim()
 }
 
-/** Format a Unix epoch ms timestamp as a local YYYY-MM-DD HH:mm string. */
+/** Format a Unix epoch ms timestamp: same-day messages show HH:mm only;
+ *  earlier ones show YYYY-MM-DD (plus HH:mm for older-than-a-week clarity). */
 function fmtTime(ms: number): string {
   if (!ms || typeof ms !== 'number') return ''
   try {
     const d = new Date(ms)
+    const now = new Date()
     const pad = (n: number): string => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+    const sameDay = d.getFullYear() === now.getFullYear()
+      && d.getMonth() === now.getMonth()
+      && d.getDate() === now.getDate()
+    const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+    if (sameDay) return time
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`
   } catch {
     return ''
   }
@@ -294,10 +338,14 @@ function scrollToKey(key: string): boolean {
 /** ------------------------------------------------------------------ view */
 
 /** The dock component: full-history listing + jump + copy. */
-function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => Promise<void> }): ReactElement {
+function HistoryDock(props: HistoryDockProps & {
+  loadOlderFor?: (id: string) => Promise<void>
+  timeout?: HistoryTimer['timeout']
+}): ReactElement {
   const session = props.session
   const sessionId = session?.sessionId
   const loadOlderFor = props.loadOlderFor
+  const timeout = props.timeout
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [notice, setNotice] = useState<string | null>(null)
@@ -308,8 +356,13 @@ function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => 
   const [pendingSeq, setPendingSeq] = useState<number | null>(null)
   const [copiedSeq, setCopiedSeq] = useState<number | null>(null)
   const [loadFailed, setLoadFailed] = useState(false)
+  const [retryToken, setRetryToken] = useState(0)
+  const [autoLoadPages, setAutoLoadPages] = useState(0)
 
   const local = useMemo(() => localWindowItems(session), [session])
+
+  const showError = (message: string): void => { setHostState('error'); setHostError(message) }
+  const showLoaded = (items: HistoryHostItem[]): void => { setHostItems(items); setHostState('loaded') }
 
   // Prefetch the full history on mount (every session renders its own dock),
   // so opening the panel later renders instantly from the cache. The panel
@@ -320,17 +373,14 @@ function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => 
     if (!prefetchCache.has(String(sessionId))) {
       fetchFullHistory(String(sessionId)).then((res) => {
         if (cancelled) return
-        if (res.ok) {
-          setHostItems(res.items)
-          setHostState('loaded')
-        } else {
-          setHostState('error')
-          setHostError(res.error ?? '读取完整历史失败')
-        }
+        if (res.ok) showLoaded(res.items)
+        else if (hostState !== 'loaded') showError(res.error ?? '读取完整历史失败')
       })
     }
     return () => { cancelled = true }
-  }, [sessionId])
+    // retryToken re-runs the prefetch after a failed fetch; hostState guards
+    // against overwriting a later successful load.
+  }, [sessionId, retryToken])
 
   // On panel open, seed from the prefetch cache immediately, then re-fetch
   // if the cached entry is stale (or missing) so new messages appear.
@@ -340,6 +390,7 @@ function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => 
     setNotice(null)
     setPendingSeq(null)
     setLoadFailed(false)
+    setAutoLoadPages(0)
     const sid = String(sessionId)
     const cached = prefetchCache.get(sid)
     if (cached !== undefined) {
@@ -349,13 +400,8 @@ function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => 
       // stale: re-fetch in the background; keep showing the cached list.
       fetchFullHistory(sid).then((res) => {
         if (cancelled) return
-        if (res.ok) {
-          setHostItems(res.items)
-          setHostState('loaded')
-        } else {
-          setHostState('error')
-          setHostError(res.error ?? '读取完整历史失败')
-        }
+        if (res.ok) showLoaded(res.items)
+        else showError(res.error ?? '读取完整历史失败')
       })
       return
     }
@@ -363,16 +409,11 @@ function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => 
     setHostError(null)
     fetchFullHistory(sid).then((res) => {
       if (cancelled) return
-      if (res.ok) {
-        setHostItems(res.items)
-        setHostState('loaded')
-      } else {
-        setHostState('error')
-        setHostError(res.error ?? '读取完整历史失败')
-      }
+      if (res.ok) showLoaded(res.items)
+      else showError(res.error ?? '读取完整历史失败')
     })
     return () => { cancelled = true }
-  }, [open, sessionId])
+  }, [open, sessionId, retryToken])
 
   // Merge: host full list (when loaded) with the local-window seq→key map.
   const items = useMemo<HistoryRow[]>(() => {
@@ -416,13 +457,20 @@ function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => 
         }
       }
       setPendingSeq(null)
+      setAutoLoadPages(0)
       return
     }
     if (loadFailed) return
+    if (autoLoadPages >= MAX_AUTO_LOAD_PAGES) {
+      setLoadFailed(true)
+      setNotice(`连续加载 ${MAX_AUTO_LOAD_PAGES} 页仍未找到该消息，已停止。可尝试向上滚动加载更早内容后重试。`)
+      return
+    }
     if (session.hasMore && !session.loadingOlder) {
       try {
         const p = loadOlderFor?.(String(sessionId))
         if (p && typeof p.then === 'function') {
+          setAutoLoadPages((n) => n + 1)
           p.catch(() => {
             setLoadFailed(true)
             setNotice('加载更早历史失败，无法定位该消息。')
@@ -436,7 +484,7 @@ function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => 
       setLoadFailed(true)
       setNotice('已加载到该会话最早的记录，仍未找到这条消息（可能已被删除）。')
     }
-  }, [pendingSeq, local.keys, items, loadFailed, session, sessionId, loadOlderFor])
+  }, [pendingSeq, local.keys, items, loadFailed, session, sessionId, loadOlderFor, autoLoadPages])
 
   const jumpTo = (it: HistoryRow): void => {
     if (it.key) {
@@ -462,10 +510,28 @@ function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => 
   const doCopy = (it: HistoryRow, e: { stopPropagation(): void }): void => {
     e.stopPropagation()
     copyText(it.text).then((ok) => {
-      if (ok) setCopiedSeq(it.seq)
-      else setNotice('复制失败。')
+      if (ok) {
+        setCopiedSeq(it.seq)
+        // auto-restore the ⧉ affordance after a beat (timer is optional;
+        // without it the ✓ stays until the next copy).
+        if (typeof timeout === 'function') {
+          timeout(() => setCopiedSeq((cur) => (cur === it.seq ? null : cur)), 1400)
+        }
+      } else {
+        setNotice('复制失败。')
+      }
     })
   }
+
+  // Close the panel on Escape, and blur-safe outside click handling.
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('keydown', onKey) }
+  }, [open])
 
   const children: ReactElement[] = []
   children.push(createElement('button', {
@@ -474,6 +540,7 @@ function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => 
     className: 'dshm_trigger',
     onClick: () => { setOpen(!open); setQuery(''); setNotice(null); setPendingSeq(null) },
     'aria-expanded': open,
+    'aria-label': '我的消息',
   }, [
     createElement('span', { key: 'badge', className: 'dshm_badge' }, `我的消息 (${items.length})`),
     createElement('span', { key: 'chev', className: 'dshm_chevron' }, open ? '▾' : '▸'),
@@ -501,10 +568,19 @@ function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => 
     if (hostState === 'loading') {
       panel.push(createElement('div', { key: 'loading', className: 'dshm_loading' }, '正在读取完整历史…'))
     } else if (hostState === 'error') {
-      panel.push(createElement('div', { key: 'error', className: 'dshm_error' }, `完整历史读取失败：${hostError ?? '未知错误'}（当前仅显示已加载窗口内的消息）`))
+      panel.push(createElement('div', { key: 'error', className: 'dshm_error' }, [
+        `完整历史读取失败：${hostError ?? '未知错误'}（当前仅显示已加载窗口内的消息）`,
+        createElement('button', {
+          key: 'retry',
+          type: 'button',
+          className: 'dshm_retry',
+          onClick: () => setRetryToken((n) => n + 1),
+        }, '重试'),
+      ]))
     }
     if (filtered.length > 0) {
-      const rows = filtered.map((it) => {
+      const trimmed = filtered.slice(0, MAX_RENDERED_ROWS)
+      const rows = trimmed.map((it) => {
         const pending = pendingSeq === it.seq
         const copied = copiedSeq === it.seq
         const tagClass = pending ? 'dshm_tagPending' : (it.key ? 'dshm_tagLoaded' : 'dshm_tag')
@@ -515,18 +591,32 @@ function HistoryDock(props: HistoryDockProps & { loadOlderFor?: (id: string) => 
           title: it.text || '(无文本)',
         }, [
           createElement('span', { key: 't', className: 'dshm_time' }, fmtTime(it.time)),
-          createElement('span', { key: 'x', className: 'dshm_text', onClick: () => jumpTo(it) }, it.text || '(无文本)'),
+          createElement('span', {
+            key: 'x',
+            className: 'dshm_text',
+            role: 'button',
+            tabIndex: 0,
+            'aria-label': `跳转到：${it.text || '(无文本)'}`,
+            onClick: () => jumpTo(it),
+            onKeyDown: (e: { key: string; preventDefault(): void }) => {
+              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jumpTo(it) }
+            },
+          }, it.text || '(无文本)'),
           createElement('span', { key: 'tag', className: tagClass, onClick: () => jumpTo(it) }, tagText),
           createElement('button', {
             key: 'c',
             type: 'button',
             className: 'dshm_copy',
             title: copied ? '已复制' : '复制文本',
+            'aria-label': copied ? '已复制' : '复制消息文本',
             onClick: (e: { stopPropagation(): void }) => doCopy(it, e),
           }, copied ? '✓' : '⧉'),
         ])
       })
       panel.push(createElement('ul', { key: 'list', className: 'dshm_list' }, rows))
+      if (filtered.length > MAX_RENDERED_ROWS) {
+        panel.push(createElement('div', { key: 'cap', className: 'dshm_notice' }, `仅显示最近 ${MAX_RENDERED_ROWS} 条匹配消息（共 ${filtered.length} 条）；使用搜索框可缩小范围。`))
+      }
     } else if (hostState !== 'loading') {
       panel.push(createElement('div', { key: 'empty', className: 'dshm_empty' }, query.trim() ? '没有匹配的消息。' : '这个会话里还没有你发起的消息。'))
     }
@@ -556,6 +646,8 @@ export function apply(ctx: Context): void {
   const slots = ctx.get('slots') as HistorySlotsService | undefined
   if (slots === undefined) return
   const sessions = ctx.get('sessions') as HistorySessionsService | undefined
+  const timer = ctx.get('timer') as HistoryTimer | undefined
+  const timeout = timer?.timeout.bind(timer)
   const loadOlderFor = sessions === undefined
     ? undefined
     : (id: string): Promise<void> => {
@@ -565,6 +657,6 @@ export function apply(ctx: Context): void {
     }
   slots.inject('conversation.input.dock', () => slots.register(
     { name: 'conversation.input.dock', id: 'dsh-history', order: 30 },
-    (props: HistoryDockProps) => createElement(HistoryDock, { session: props.session, loadOlderFor }),
+    (props: HistoryDockProps) => createElement(HistoryDock, { session: props.session, loadOlderFor, timeout }),
   ))
 }

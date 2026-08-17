@@ -69,10 +69,15 @@ interface HistoryContentBlock {
 interface HistoryDockProps {
     session?: HistoryConversationSnapshot;
 }
+/** Timer service face (optional; used to auto-clear the copy feedback). */
+interface HistoryTimer {
+    timeout(callback: () => void, delay: number): () => void;
+}
 declare module 'cordis' {
     interface Context {
         slots: HistorySlotsService;
         sessions?: HistorySessionsService;
+        timer?: HistoryTimer;
     }
 }
 /** ------------------------------------------------------------------ plugin */
