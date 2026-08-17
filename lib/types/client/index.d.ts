@@ -1,23 +1,18 @@
 /**
  * dsh-history client half: a dock row above the composer ("我的消息 (N)") that
  * lists EVERY message the human sent in the current session — the full log,
- * including pages not yet loaded into the conversation window. Features:
+ * including pages not yet loaded into the conversation window.
  *
- * - newest-first list with an oldest/newest toggle and live text filtering;
- * - one-click copy of any message's text (Clipboard API with execCommand
- *   fallback);
- * - click a message already in the window → smooth-scroll + flash highlight;
- * - click an "未加载" (not-loaded) message → auto-calls the session's official
- *   `loadOlder()` page by page until the target lands in the window, then
- *   scrolls to it (product API, no DOM hacks).
- *
- * The host half (lib/index.js) serves the full-history JSON over the fenced
- * `/history/api/list-user-messages` route; this bundle calls it with plain
- * fetch (a third-party plugin has no `host.call`). Styles are injected as a
- * style tag (no `styles` builtin outside the dynamic-plugin sandbox).
+ * Reuses DSH-native interfaces where possible:
+ * - `conversation.input.dock` slot for the entry point;
+ * - the product's `data-chat-anchor-key` semantic anchor + `session.loadOlder()`
+ *   for jump/auto-load (see util.ts);
+ * - `ctx.timer` for the copy-feedback restore.
+ * Pure helpers live in ./util.ts; this file only renders and manages state.
  */
 import { type ReactElement } from 'react';
 import type { Context } from 'cordis';
+import { type HistoryConversationSnapshot } from './util';
 /** ------------------------------------------------------------------ types */
 /** The client slots service face (structural subset used here). */
 interface HistorySlotsService {
@@ -35,35 +30,6 @@ interface ClientSessionsService {
             loadOlder(): Promise<void>;
         };
     } | undefined;
-}
-/** The conversation snapshot slice this plugin reads (structural subset). */
-interface HistoryConversationSnapshot {
-    sessionId?: string;
-    hasMore?: boolean;
-    loadingOlder?: boolean;
-    chat?: {
-        nodes?: {
-            values(): readonly HistoryChatNode[];
-        };
-    };
-}
-/** One materialized chat node (user or steering message). */
-interface HistoryChatNode {
-    kind?: string;
-    key?: string;
-    anchorSeq?: number;
-    visibility?: string;
-    data?: {
-        seq?: number;
-        time?: number;
-        content?: readonly HistoryContentBlock[];
-    };
-}
-/** One content block (structural subset: the text/image/tool shapes). */
-interface HistoryContentBlock {
-    type?: string;
-    text?: string;
-    name?: string;
 }
 /** Props the dock slot renders with. */
 interface HistoryDockProps {
@@ -85,7 +51,7 @@ declare module 'cordis' {
 export declare const inject: string[];
 /**
  * Client plugin body: inject the stylesheet and register the dock row.
- * @param ctx - client plugin context (slots, sessions).
+ * @param ctx - client plugin context (slots, sessions, timer).
  */
 export declare function apply(ctx: Context): void;
 export {};

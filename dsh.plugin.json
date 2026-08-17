@@ -1,6 +1,6 @@
 {
   "id": "dsh-external/dsh-history",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "main": "./lib/index.mjs",
   "description": "DSH web plugin: quickly view, search, and jump to all messages YOU sent in a long conversation. Full-history listing, auto-load of earlier pages, smooth-scroll + flash targeting, newest-first sorting, and one-click copy.",
   "engines": {

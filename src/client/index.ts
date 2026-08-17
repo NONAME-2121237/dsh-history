@@ -1,23 +1,26 @@
 /**
  * dsh-history client half: a dock row above the composer ("我的消息 (N)") that
  * lists EVERY message the human sent in the current session — the full log,
- * including pages not yet loaded into the conversation window. Features:
+ * including pages not yet loaded into the conversation window.
  *
- * - newest-first list with an oldest/newest toggle and live text filtering;
- * - one-click copy of any message's text (Clipboard API with execCommand
- *   fallback);
- * - click a message already in the window → smooth-scroll + flash highlight;
- * - click an "未加载" (not-loaded) message → auto-calls the session's official
- *   `loadOlder()` page by page until the target lands in the window, then
- *   scrolls to it (product API, no DOM hacks).
- *
- * The host half (lib/index.js) serves the full-history JSON over the fenced
- * `/history/api/list-user-messages` route; this bundle calls it with plain
- * fetch (a third-party plugin has no `host.call`). Styles are injected as a
- * style tag (no `styles` builtin outside the dynamic-plugin sandbox).
+ * Reuses DSH-native interfaces where possible:
+ * - `conversation.input.dock` slot for the entry point;
+ * - the product's `data-chat-anchor-key` semantic anchor + `session.loadOlder()`
+ *   for jump/auto-load (see util.ts);
+ * - `ctx.timer` for the copy-feedback restore.
+ * Pure helpers live in ./util.ts; this file only renders and manages state.
  */
 import { createElement, useEffect, useMemo, useState, type ReactElement } from 'react'
 import type { Context } from 'cordis'
+import {
+  type HistoryConversationSnapshot,
+  type HistoryRow,
+  collectWindowItems,
+  copyText,
+  findAnchor,
+  fmtTime,
+  scrollToKey,
+} from './util'
 
 /** ------------------------------------------------------------------ types */
 
@@ -38,51 +41,11 @@ interface ClientSessionsService {
   } | undefined
 }
 
-/** The conversation snapshot slice this plugin reads (structural subset). */
-interface HistoryConversationSnapshot {
-  sessionId?: string
-  hasMore?: boolean
-  loadingOlder?: boolean
-  chat?: {
-    nodes?: {
-      values(): readonly HistoryChatNode[]
-    }
-  }
-}
-
-/** One materialized chat node (user or steering message). */
-interface HistoryChatNode {
-  kind?: string
-  key?: string
-  anchorSeq?: number
-  visibility?: string
-  data?: {
-    seq?: number
-    time?: number
-    content?: readonly HistoryContentBlock[]
-  }
-}
-
-/** One content block (structural subset: the text/image/tool shapes). */
-interface HistoryContentBlock {
-  type?: string
-  text?: string
-  name?: string
-}
-
 /** One full-history row from the host route. */
 interface HistoryHostItem {
   seq: number
   time: number
   text: string
-}
-
-/** One rendered list row (host data merged with the local-window key). */
-interface HistoryRow {
-  seq: number
-  time: number
-  text: string
-  key: string | null
 }
 
 /** Props the dock slot renders with. */
@@ -153,38 +116,20 @@ function injectStyles(): () => void {
   }
 }
 
-/** ------------------------------------------------------------------ utils */
+/** ------------------------------------------------------------------ data */
 
 /**
  * module-level prefetch cache: sessionId → full-history items. The dock
- * component prefetches on mount (every session renders its own dock), so
- * opening the panel later reads this cache and renders instantly. A panel
- * open with a stale/absent cache still fetches fresh and re-caches.
+ * prefetches on mount (every session renders its own dock), so opening the
+ * panel reads this cache and renders instantly. Bounded to avoid leaks.
  */
 const prefetchCache = new Map<string, { at: number; items: HistoryHostItem[] }>()
 
-/** Prefetch TTL (ms): a fresh prefetch is served immediately; older entries
- *  are re-fetched on open so new messages surface. */
 const PREFETCH_TTL = 10000
-
-/** Full-history fetch timeout (ms): a hung host route must not pin the panel
- *  in "loading" forever — we fall back to the local window list. */
 const FETCH_TIMEOUT = 15000
-
-/** Cap on the module-level prefetch cache size: evict oldest-first so a
- *  long-lived page switching many sessions cannot grow it unboundedly. */
 const PREFETCH_CACHE_MAX = 20
-
-/** Cap on sequential auto-load pages while hunting one target message:
- *  guards against pathological loops if the host keeps reporting hasMore. */
 const MAX_AUTO_LOAD_PAGES = 30
-
-/** Cap on DOM-wait retries when a target's row is loaded but not yet
- *  committed to the DOM (React render lag). 10 × 150ms ≈ 1.5s. */
 const MAX_LOCATE_RETRIES = 10
-
-/** Cap on rendered rows: an enormous history would otherwise render
- *  hundreds of DOM nodes; show the newest N and a hint. */
 const MAX_RENDERED_ROWS = 200
 
 /** Fetch the full history for a session (network + re-cache, with timeout). */
@@ -203,7 +148,6 @@ function fetchFullHistory(sessionId: string): Promise<{ ok: boolean; items: Hist
     .then((data: unknown) => {
       const record = data as { ok?: boolean; items?: HistoryHostItem[]; error?: string }
       if (record && record.ok === true && Array.isArray(record.items)) {
-        // bounded cache: evict oldest entry when over the cap.
         if (prefetchCache.size >= PREFETCH_CACHE_MAX) {
           const oldest = prefetchCache.keys().next().value
           if (oldest !== undefined) prefetchCache.delete(oldest)
@@ -223,157 +167,6 @@ function fetchFullHistory(sessionId: string): Promise<{ ok: boolean; items: Hist
     })
 }
 
-/** Flatten one message's content blocks to a single preview string. */
-function textOf(content: readonly HistoryContentBlock[] | undefined): string {
-  if (!Array.isArray(content)) return ''
-  const parts: string[] = []
-  for (const b of content) {
-    if (b && b.type === 'text' && typeof b.text === 'string') parts.push(b.text)
-    else if (b && b.type === 'image') parts.push('[图片]')
-    else if (b && b.type === 'tool-call' && typeof b.name === 'string') parts.push('[工具: ' + b.name + ']')
-  }
-  return parts.join(' ').replace(/\s+/g, ' ').trim()
-}
-
-/** Format a Unix epoch ms timestamp: same-day messages show HH:mm only;
- *  earlier ones show YYYY-MM-DD (plus HH:mm for older-than-a-week clarity). */
-function fmtTime(ms: number): string {
-  if (!ms || typeof ms !== 'number') return ''
-  try {
-    const d = new Date(ms)
-    const now = new Date()
-    const pad = (n: number): string => String(n).padStart(2, '0')
-    const sameDay = d.getFullYear() === now.getFullYear()
-      && d.getMonth() === now.getMonth()
-      && d.getDate() === now.getDate()
-    const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`
-    if (sameDay) return time
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`
-  } catch {
-    return ''
-  }
-}
-
-/** Find the conversation row DOM element for a chat-node anchor key. */
-function findAnchor(key: string): HTMLElement | null {
-  if (typeof document === 'undefined') return null
-  const rows = document.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i]
-    if (row && row.dataset && row.dataset.chatAnchorKey === key) return row
-  }
-  return null
-}
-
-/** Copy text to the clipboard: Clipboard API first, execCommand fallback. */
-function copyText(text: string): Promise<boolean> {
-  if (!text) return Promise.resolve(false)
-  if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-    return navigator.clipboard.writeText(text).then(() => true).catch(() => fallbackCopy(text))
-  }
-  return Promise.resolve(fallbackCopy(text))
-}
-
-function fallbackCopy(text: string): boolean {
-  if (typeof document === 'undefined') return false
-  try {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(ta)
-    return ok
-  } catch {
-    return false
-  }
-}
-
-/** Collect the messages visible in the currently loaded window + seq→key map. */
-function localWindowItems(session: HistoryConversationSnapshot | undefined): {
-  items: HistoryRow[]
-  keys: Map<number, string>
-} {
-  const items: HistoryRow[] = []
-  const keys = new Map<number, string>()
-  if (!session || !session.chat || !session.chat.nodes) return { items, keys }
-  let nodes: readonly HistoryChatNode[] = []
-  try {
-    nodes = session.chat.nodes.values()
-  } catch {
-    nodes = []
-  }
-  for (const node of nodes) {
-    if (!node) continue
-    if (node.kind !== 'user' && node.kind !== 'steering') continue
-    if (node.visibility === 'hidden') continue
-    const data = node.data || {}
-    const seq = typeof node.anchorSeq === 'number' ? node.anchorSeq : (typeof data.seq === 'number' ? data.seq : 0)
-    if (typeof node.key === 'string' && node.key) keys.set(seq, node.key)
-    items.push({
-      seq,
-      time: typeof data.time === 'number' ? data.time : 0,
-      text: textOf(data.content),
-      key: typeof node.key === 'string' ? node.key : null,
-    })
-  }
-  items.sort((a, b) => a.seq - b.seq)
-  return { items, keys }
-}
-
-/** Scroll a message row into view (centered) and flash-highlight it.
- *  Prefers direct scrollport positioning via getBoundingClientRect — this is
- *  synchronous and reliable even while the dock panel is open, unlike
- *  scrollIntoView({behavior:'smooth'}) which is async and can silently no-op
- *  or be cancelled by a layout change that happens right after the click. */
-function scrollToKey(key: string): boolean {
-  const el = findAnchor(key)
-  if (!el) return false
-  try {
-    // Flash highlight first so the target is unmistakable.
-    el.classList.remove('dshm-flash')
-    void el.offsetWidth
-    el.classList.add('dshm-flash')
-    el.addEventListener('animationend', () => el.classList.remove('dshm-flash'), { once: true })
-
-    // Find the nearest scrollable ancestor (the conversation scrollport).
-    let port: HTMLElement | null = null
-    let node: HTMLElement | null = el.parentElement
-    while (node !== null) {
-      const overflow = getComputedStyle(node).overflowY
-      if (overflow === 'auto' || overflow === 'scroll' || overflow === 'overlay') {
-        port = node
-        break
-      }
-      node = node.parentElement
-    }
-
-    if (port !== null) {
-      // Center the target within the scrollport using viewport-relative
-      // coords so we are independent of any offsetParent along the way.
-      const elRect = el.getBoundingClientRect()
-      const portRect = port.getBoundingClientRect()
-      const target = port.scrollTop + elRect.top - portRect.top - portRect.height / 2 + elRect.height / 2
-      if (Math.abs(target - port.scrollTop) > 1) {
-        port.scrollTop = target
-      }
-      return true
-    }
-
-    // No scrollport found (unlikely): fall back to native scrollIntoView.
-    try {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    } catch {
-      return false
-    }
-    return true
-  } catch {
-    return false
-  }
-}
-
 /** ------------------------------------------------------------------ view */
 
 /** The dock component: full-history listing + jump + copy. */
@@ -390,7 +183,7 @@ function HistoryDock(props: HistoryDockProps & {
   const [notice, setNotice] = useState<string | null>(null)
   const [desc, setDesc] = useState(true)
   const [hostItems, setHostItems] = useState<HistoryHostItem[] | null>(null)
-  const [hostState, setHostState] = useState<'idle' | 'loading' | 'loaded' | 'error' | 'fallback'>('idle')
+  const [hostState, setHostState] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
   const [hostError, setHostError] = useState<string | null>(null)
   const [pendingSeq, setPendingSeq] = useState<number | null>(null)
   const [pendingRetry, setPendingRetry] = useState(0)
@@ -399,76 +192,55 @@ function HistoryDock(props: HistoryDockProps & {
   const [retryToken, setRetryToken] = useState(0)
   const [autoLoadPages, setAutoLoadPages] = useState(0)
 
-  const local = useMemo(() => localWindowItems(session), [session])
+  const local = useMemo(() => collectWindowItems(session), [session])
 
-  const showError = (message: string): void => { setHostState('error'); setHostError(message) }
-  const showLoaded = (items: HistoryHostItem[]): void => { setHostItems(items); setHostState('loaded') }
+  const applyHistory = (res: { ok: boolean; items: HistoryHostItem[]; error?: string }): void => {
+    if (res.ok) { setHostItems(res.items); setHostState('loaded') }
+    else { setHostState('error'); setHostError(res.error ?? '读取完整历史失败') }
+  }
+  const resetLocate = (): void => {
+    setPendingSeq(null); setPendingRetry(0); setLoadFailed(false); setAutoLoadPages(0)
+  }
 
-  // Prefetch the full history on mount (every session renders its own dock),
-  // so opening the panel later renders instantly from the cache. The panel
-  // re-fetches on open only when the prefetch is stale or absent.
+  // Prefetch the full history on mount, so opening the panel renders instantly.
   useEffect(() => {
     if (sessionId === undefined) return
     let cancelled = false
     if (!prefetchCache.has(String(sessionId))) {
       fetchFullHistory(String(sessionId)).then((res) => {
         if (cancelled) return
-        if (res.ok) showLoaded(res.items)
-        else if (hostState !== 'loaded') showError(res.error ?? '读取完整历史失败')
+        if (res.ok) applyHistory(res)
+        else if (hostState !== 'loaded') applyHistory(res)
       })
     }
     return () => { cancelled = true }
-    // retryToken re-runs the prefetch after a failed fetch; hostState guards
-    // against overwriting a later successful load.
   }, [sessionId, retryToken])
 
-  // On panel open, seed from the prefetch cache immediately, then re-fetch
-  // if the cached entry is stale (or missing) so new messages appear.
+  // On open, seed from the cache immediately; re-fetch only if stale/absent.
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    setNotice(null)
-    setPendingSeq(null)
-    setPendingRetry(0)
-    setLoadFailed(false)
-    setAutoLoadPages(0)
+    setNotice(null); resetLocate()
     const sid = String(sessionId)
     const cached = prefetchCache.get(sid)
     if (cached !== undefined) {
-      setHostItems(cached.items)
-      setHostState('loaded')
+      setHostItems(cached.items); setHostState('loaded')
       if (Date.now() - cached.at < PREFETCH_TTL) return
-      // stale: re-fetch in the background; keep showing the cached list.
-      fetchFullHistory(sid).then((res) => {
-        if (cancelled) return
-        if (res.ok) showLoaded(res.items)
-        else showError(res.error ?? '读取完整历史失败')
-      })
+      fetchFullHistory(sid).then((res) => { if (!cancelled) applyHistory(res) })
       return
     }
-    setHostState('loading')
-    setHostError(null)
-    fetchFullHistory(sid).then((res) => {
-      if (cancelled) return
-      if (res.ok) showLoaded(res.items)
-      else showError(res.error ?? '读取完整历史失败')
-    })
+    setHostState('loading'); setHostError(null)
+    fetchFullHistory(sid).then((res) => { if (!cancelled) applyHistory(res) })
     return () => { cancelled = true }
   }, [open, sessionId, retryToken])
 
-  // Merge: host full list (when loaded) with the local-window seq→key map.
+  // Merge host full list with the local-window seq→key map; apply sort.
   const items = useMemo<HistoryRow[]>(() => {
-    let base: HistoryRow[]
-    if (hostState === 'loaded' && Array.isArray(hostItems)) {
-      base = hostItems.map((it) => ({
-        seq: it.seq,
-        time: it.time,
-        text: it.text || '',
-        key: local.keys.get(it.seq) ?? null,
+    const base = hostState === 'loaded' && Array.isArray(hostItems)
+      ? hostItems.map((it) => ({
+        seq: it.seq, time: it.time, text: it.text || '', key: local.keys.get(it.seq) ?? null,
       }))
-    } else {
-      base = local.items
-    }
+      : local.items
     const out = base.slice()
     if (desc) out.sort((a, b) => b.seq - a.seq)
     else out.sort((a, b) => a.seq - b.seq)
@@ -481,50 +253,32 @@ function HistoryDock(props: HistoryDockProps & {
     return items.filter((it) => it.text.toLowerCase().indexOf(q) !== -1)
   }, [items, query])
 
-  // Auto-locate a target message: page-load earlier history until the node
-  // lands in the loaded window, then wait (with retries) for the DOM row to
-  // actually render, then smooth-scroll + flash and close the panel. The
-  // retry loop covers the render lag between the snapshot update and the
-  // React commit that materializes the anchor element.
+  // Auto-locate a target: page-load earlier history until the node lands in the
+  // loaded window, then wait for its DOM row to render, then scroll + close.
   useEffect(() => {
     if (pendingSeq === null) return
     if (!session || !session.chat) return
     const key = local.keys.get(pendingSeq)
     if (key !== undefined) {
-      // Node is loaded. Wait for its DOM row (it may not be committed yet).
       if (findAnchor(key) !== null) {
-        const ok = scrollToKey(key)
-        if (ok) {
-          setOpen(false)
-          setQuery('')
-          setNotice(null)
+        if (scrollToKey(key)) {
+          setOpen(false); setQuery(''); setNotice(null)
         } else {
-          // Element exists but the scroll refused; keep the panel open and
-          // let the user retry — rare, but never silently fail.
           setNotice('已定位到该消息，但页面滚动未生效，请再点击一次。')
         }
-        setPendingSeq(null)
-        setAutoLoadPages(0)
-        setPendingRetry(0)
+        resetLocate()
         return
       }
       if (pendingRetry >= MAX_LOCATE_RETRIES) {
-        setPendingSeq(null)
-        setAutoLoadPages(0)
-        setPendingRetry(0)
+        resetLocate()
         setNotice('该消息正在渲染中，暂时无法定位。请稍候再试。')
         return
       }
       setNotice('正在定位该消息…')
-      if (typeof timeout === 'function') {
-        timeout(() => setPendingRetry((n) => n + 1), 150)
-      } else {
-        // No timer service: retry on the next render cycle instead.
-        setPendingRetry((n) => n + 1)
-      }
+      if (typeof timeout === 'function') timeout(() => setPendingRetry((n) => n + 1), 150)
+      else setPendingRetry((n) => n + 1)
       return
     }
-    // Node not loaded yet: page-load earlier history.
     if (loadFailed) return
     if (autoLoadPages >= MAX_AUTO_LOAD_PAGES) {
       setLoadFailed(true)
@@ -538,13 +292,11 @@ function HistoryDock(props: HistoryDockProps & {
           setAutoLoadPages((n) => n + 1)
           setNotice('正在加载更早历史以定位该消息…')
           p.then(() => setPendingRetry((n) => n + 1)).catch(() => {
-            setLoadFailed(true)
-            setNotice('加载更早历史失败，无法定位该消息。')
+            setLoadFailed(true); setNotice('加载更早历史失败，无法定位该消息。')
           })
         }
       } catch {
-        setLoadFailed(true)
-        setNotice('加载更早历史失败，无法定位该消息。')
+        setLoadFailed(true); setNotice('加载更早历史失败，无法定位该消息。')
       }
     } else if (!session.hasMore) {
       setLoadFailed(true)
@@ -555,19 +307,12 @@ function HistoryDock(props: HistoryDockProps & {
   const jumpTo = (it: HistoryRow): void => {
     if (pendingSeq === it.seq) return
     if (it.key) {
-      // Already in the loaded window: scroll now, or wait for the DOM row to
-      // render if the commit lags (the effect above handles the wait loop).
       if (findAnchor(it.key) !== null && scrollToKey(it.key)) {
-        setOpen(false)
-        setQuery('')
-        setNotice(null)
+        setOpen(false); setQuery(''); setNotice(null)
         return
       }
       setNotice('正在定位该消息…')
-      setPendingSeq(it.seq)
-      setPendingRetry(0)
-      setLoadFailed(false)
-      setAutoLoadPages(0)
+      setPendingSeq(it.seq); setPendingRetry(0); setLoadFailed(false); setAutoLoadPages(0)
       return
     }
     if (typeof loadOlderFor !== 'function') {
@@ -575,10 +320,7 @@ function HistoryDock(props: HistoryDockProps & {
       return
     }
     setNotice('正在加载更早历史以定位该消息…')
-    setPendingSeq(it.seq)
-    setPendingRetry(0)
-    setLoadFailed(false)
-    setAutoLoadPages(0)
+    setPendingSeq(it.seq); setPendingRetry(0); setLoadFailed(false); setAutoLoadPages(0)
   }
 
   const doCopy = (it: HistoryRow, e: { stopPropagation(): void }): void => {
@@ -586,8 +328,6 @@ function HistoryDock(props: HistoryDockProps & {
     copyText(it.text).then((ok) => {
       if (ok) {
         setCopiedSeq(it.seq)
-        // auto-restore the ⧉ affordance after a beat (timer is optional;
-        // without it the ✓ stays until the next copy).
         if (typeof timeout === 'function') {
           timeout(() => setCopiedSeq((cur) => (cur === it.seq ? null : cur)), 1400)
         }
@@ -597,12 +337,10 @@ function HistoryDock(props: HistoryDockProps & {
     })
   }
 
-  // Close the panel on Escape, and blur-safe outside click handling.
+  // Close on Escape.
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setOpen(false)
-    }
+    const onKey = (e: KeyboardEvent): void => { if (e.key === 'Escape') setOpen(false) }
     document.addEventListener('keydown', onKey)
     return () => { document.removeEventListener('keydown', onKey) }
   }, [open])
@@ -713,7 +451,7 @@ export const inject = ['slots']
 
 /**
  * Client plugin body: inject the stylesheet and register the dock row.
- * @param ctx - client plugin context (slots, sessions).
+ * @param ctx - client plugin context (slots, sessions, timer).
  */
 export function apply(ctx: Context): void {
   ctx.effect(() => injectStyles(), 'dsh-history: stylesheet')
