@@ -46,7 +46,14 @@ DSH web 插件：在超长会话里**快速查看、搜索并跳转到所有"你
 dsh plugin --profile web add dsh-history@latest
 ```
 
-装完后运行 `bash restart-dsh-web.sh` 自动重启服务（或硬刷新浏览器 Cmd/Ctrl+Shift+R）。每个会话输入框上方自动出现 **"我的消息 (N)"**，无需手动操作。
+装完后运行脚本自动重启服务生效（或硬刷新浏览器 Cmd/Ctrl+Shift+R）：
+
+```bash
+# 脚本随包安装，直接用它（完整路径，任意目录可执行）
+bash ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh
+```
+
+每个会话输入框上方自动出现 **"我的消息 (N)"**，无需手动操作。
 
 ### 方式二：直接从 GitHub 安装（无需等待 npm 发布）
 
@@ -56,7 +63,11 @@ dsh plugin --profile web add github:chenproton/dsh-history#main
 dsh plugin --profile web add https://github.com/chenproton/dsh-history.git#main
 ```
 
-装完后同样运行 `bash restart-dsh-web.sh`（或硬刷新浏览器）。此方式直接使用仓库已提交的构建产物，无需本地构建。
+装完后同样运行 `bash ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh`（或硬刷新浏览器）。此方式直接使用仓库已提交的构建产物，无需本地构建。
+
+> 如果在当前目录直接敲 `bash restart-dsh-web.sh` 报 `No such file or directory`，
+> 说明脚本不在当前目录——请用上面的完整路径，或先 `cp` 到当前目录再运行
+> （详见安装章节顶部的获取脚本说明）。
 
 ### 更新（npm / GitHub 通道通用）
 
@@ -67,7 +78,7 @@ dsh plugin --profile web update dsh-history            # pnpm 语义更新
 # GitHub 通道则重跑方式二的命令
 ```
 
-也可把 `~/.dsh/profiles/web/package.json` 里的版本号改高后 `pnpm install`。改完运行 `bash restart-dsh-web.sh` 或硬刷新浏览器即可。
+也可把 `~/.dsh/profiles/web/package.json` 里的版本号改高后 `pnpm install`。改完运行 `bash ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh` 或硬刷新浏览器即可。
 
 ---
 
@@ -94,12 +105,13 @@ cd ~/Code/dsh-history && pnpm install && pnpm build
 # 4. 在 profile 目录安装
 cd ~/.dsh/profiles/web && pnpm install
 
-# 5. 运行 bash restart-dsh-web.sh 自动重启生效（或硬刷新浏览器）
+# 5. 运行脚本自动重启生效（脚本在克隆目录里，也可用 npm 包内完整路径）
+bash ~/Code/dsh-history/restart-dsh-web.sh
 ```
 
-**更新**：`git pull && pnpm install && pnpm build` → `bash restart-dsh-web.sh`（client 改动热加载生效，无需重启 DSH；host 半改动才需重启）。
+**更新**：`git pull && pnpm install && pnpm build` → `bash ~/Code/dsh-history/restart-dsh-web.sh`（client 改动热加载生效，无需重启 DSH；host 半改动才需重启）。
 
-**切回 npm 通道**：把依赖改回 `"dsh-history": "^0.1.10"` 再 `pnpm install`，并移除手动挂载行（避免双挂载）。
+**切回 npm 通道**：把依赖改回 `"dsh-history": "^0.1.12"` 再 `pnpm install`，并移除手动挂载行（避免双挂载）。
 
 ### 通过 plugin-registry 安装（可选，与上述二选一）
 
