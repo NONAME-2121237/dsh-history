@@ -11,51 +11,39 @@ DSH web 插件：在超长会话里**快速查看、搜索并跳转到所有"你
 - **一键复制**：每行复制按钮，一键复制完整消息文本。
 - **快速启动**：进入会话即后台预取完整列表，打开面板秒开；Host 侧带缓存。
 
----
-
 ## 🚀 安装
 
-**前置**：已装好 DSH（`dsh web` 能正常运行），Node.js ≥ 20、pnpm ≥ 10。
-
-> 💡 **装完怎么生效？** 插件安装后，运行配套脚本 **`restart-dsh-web.sh`** 即可自动重启 DSH Web 服务让插件生效（也可手动硬刷新浏览器；仅 host 半更新时需重启）。脚本会自动探测部署方式：
-> - 本机由 **systemd** 管理（`dsh-web.service`）→ 自动走 `systemctl restart`（干净单实例）；
-> - 否则自动发现运行中的 `dsh web` 进程，读取原始启动参数原样重启（nohup）；
-> - 找不到进程时直接用 `dsh web` 启动。
->
-> 脚本随 npm 包一起分发，**装完包后直接运行（无需下载）**：
-> ```bash
-> # 方式 A：直接用包内的脚本（推荐，路径固定）
-> bash ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh
->
-> # 方式 B：拷贝到常用位置后运行
-> cp ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh ~/restart-dsh-web.sh
-> bash ~/restart-dsh-web.sh
->
-> # 方式 C：从仓库直接下载（未装 npm 包时）
-> curl -O https://raw.githubusercontent.com/chenproton/dsh-history/main/restart-dsh-web.sh
-> bash restart-dsh-web.sh
-> ```
-> 参数：`-n` 预览将执行的命令（dry-run）、`-p PID` 指定进程、`-l 文件` 指定日志。
-> 
-> > ℹ️ 安装时的 `✕ missing peer` 警告可安全忽略：DSH 运行时通过自身 module table
-> > 提供 `@deepseek-ai/*` 与 react 等依赖，无需在 profile 中重复安装。
-
-### 方式一：从 npm 安装（推荐）
+**前置**：已装好 DSH（`dsh web` 能正常运行）。
 
 ```bash
+# 1. 安装插件
 dsh plugin --profile web add dsh-history@latest
-```
 
-装完后运行脚本自动重启服务生效（或硬刷新浏览器 Cmd/Ctrl+Shift+R）：
-
-```bash
-# 脚本随包安装，直接用它（完整路径，任意目录可执行）
+# 2. 自动重启服务生效（脚本随插件一起安装，无需下载）
 bash ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh
 ```
 
-每个会话输入框上方自动出现 **"我的消息 (N)"**，无需手动操作。
+装完每个会话输入框上方自动出现 **"我的消息 (N)"**，无需手动操作。
 
-### 方式二：直接从 GitHub 安装（无需等待 npm 发布）
+---
+
+## 常见问题
+
+<details>
+<summary><b>如何更新插件？</b></summary>
+
+```bash
+dsh plugin --profile web update dsh-history
+# 或直接装最新版
+dsh plugin --profile web add dsh-history@latest
+```
+
+改完运行 `bash ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh`（或硬刷新浏览器）即可。
+
+</details>
+
+<details>
+<summary><b>如何从 GitHub 直接安装（不经过 npm）？</b></summary>
 
 ```bash
 dsh plugin --profile web add github:chenproton/dsh-history#main
@@ -63,28 +51,12 @@ dsh plugin --profile web add github:chenproton/dsh-history#main
 dsh plugin --profile web add https://github.com/chenproton/dsh-history.git#main
 ```
 
-装完后同样运行 `bash ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh`（或硬刷新浏览器）。此方式直接使用仓库已提交的构建产物，无需本地构建。
+装完后同样运行 `bash ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh`。此方式直接使用仓库已提交的构建产物，无需本地构建。
 
-> 如果在当前目录直接敲 `bash restart-dsh-web.sh` 报 `No such file or directory`，
-> 说明脚本不在当前目录——请用上面的完整路径，或先 `cp` 到当前目录再运行
-> （详见安装章节顶部的获取脚本说明）。
+</details>
 
-### 更新（npm / GitHub 通道通用）
-
-```bash
-dsh plugin --profile web add dsh-history@latest        # 更新到 npm 最新版
-# 或
-dsh plugin --profile web update dsh-history            # pnpm 语义更新
-# GitHub 通道则重跑方式二的命令
-```
-
-也可把 `~/.dsh/profiles/web/package.json` 里的版本号改高后 `pnpm install`。改完运行 `bash ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh` 或硬刷新浏览器即可。
-
----
-
-## 常见问题
-
-### 从源码安装 / 开发（可选，替代 npm 方式）
+<details>
+<summary><b>如何从源码安装 / 开发调试？</b></summary>
 
 调试本地改动或跟随开发分支时，把依赖指向本地克隆并自行构建：
 
@@ -105,15 +77,18 @@ cd ~/Code/dsh-history && pnpm install && pnpm build
 # 4. 在 profile 目录安装
 cd ~/.dsh/profiles/web && pnpm install
 
-# 5. 运行脚本自动重启生效（脚本在克隆目录里，也可用 npm 包内完整路径）
+# 5. 重启生效（脚本在克隆目录里）
 bash ~/Code/dsh-history/restart-dsh-web.sh
 ```
 
-**更新**：`git pull && pnpm install && pnpm build` → `bash ~/Code/dsh-history/restart-dsh-web.sh`（client 改动热加载生效，无需重启 DSH；host 半改动才需重启）。
+**更新**：`git pull && pnpm install && pnpm build` → `bash ~/Code/dsh-history/restart-dsh-web.sh`。
 
-**切回 npm 通道**：把依赖改回 `"dsh-history": "^0.1.12"` 再 `pnpm install`，并移除手动挂载行（避免双挂载）。
+**切回 npm 通道**：把依赖改回 `"dsh-history": "^0.1.13"` 再 `pnpm install`，并移除手动挂载行（避免双挂载）。
 
-### 通过 plugin-registry 安装（可选，与上述二选一）
+</details>
+
+<details>
+<summary><b>如何通过 plugin-registry 安装？</b></summary>
 
 > 前置：DSH 已集成 plugin-registry（`dsh registry` 命令可用）。同时启用两个通道会双挂载（Node 半挂两次、页面两个面板）。
 
@@ -127,6 +102,52 @@ bash restart-dsh-web.sh                # 自动重启生效
 ```
 
 **更新**：`git pull && pnpm install && pnpm build` → `node scripts/package-registry.mjs` → `dsh registry uninstall/install/enable` → `bash restart-dsh-web.sh`。切换通道前先移除另一通道的挂载。
+
+</details>
+
+<details>
+<summary><b>restart-dsh-web.sh 是什么？报 "No such file or directory"？</b></summary>
+
+它是随插件一起分发的**一键重启脚本**：自动探测部署方式并重启 DSH Web 让插件生效——
+
+- 本机由 **systemd** 管理（`dsh-web.service`）→ 自动走 `systemctl restart`（干净单实例）；
+- 否则自动发现运行中的 `dsh web` 进程，读取原始启动参数原样重启（nohup）；
+- 找不到进程时直接用 `dsh web` 启动。
+
+报 `No such file or directory` 是因为脚本不在当前 shell 目录——请用完整路径，或先拷贝到当前目录：
+
+```bash
+# 直接用包内脚本（完整路径，任意目录可执行）
+bash ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh
+
+# 或拷贝到当前目录后运行
+cp ~/.dsh/profiles/web/node_modules/dsh-history/restart-dsh-web.sh ~/restart-dsh-web.sh
+bash ~/restart-dsh-web.sh
+
+# 或未装包时从仓库下载
+curl -O https://raw.githubusercontent.com/chenproton/dsh-history/main/restart-dsh-web.sh
+bash restart-dsh-web.sh
+```
+
+参数：`-n` 预览将执行的命令（dry-run）、`-p PID` 指定进程、`-l 文件` 指定日志。
+
+</details>
+
+<details>
+<summary><b>安装时出现 "✕ missing peer" 警告？</b></summary>
+
+可安全忽略。DSH 运行时通过自身 module table 提供 `@deepseek-ai/*` 与 react 等依赖，无需在 profile 中重复安装（官方插件同样如此）。
+
+</details>
+
+<details>
+<summary><b>装完看不到 "我的消息"？</b></summary>
+
+1. 确认重启过服务（运行 `restart-dsh-web.sh`）或硬刷新浏览器（Cmd/Ctrl+Shift+R）；
+2. 确认插件已加入 bundle：`cat ~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 应含 `dsh-history`；
+3. 仍不行，把 `dsh plugin --profile web list` 的输出发到 issue 反馈。
+
+</details>
 
 ---
 
@@ -142,17 +163,21 @@ bash restart-dsh-web.sh                # 自动重启生效
 
 ## 版本更新记录
 
+### v0.1.13
+
+- 文档：安装章节精简为最推荐的 npm 方式；GitHub / 源码 / registry / 脚本 / peer 警告等
+  全部移入"常见问题"并用折叠方式展示，便于快速阅读。
+
 ### v0.1.11
 
 - 新增配套脚本 **`restart-dsh-web.sh`**：安装/更新插件后一键自动重启 DSH Web 生效。
   自动探测部署方式（systemd 服务 / 裸进程原样重启 / 直接启动），支持 `-n` 预览、
-  `-p` 指定 PID、`-l` 指定日志；四种安装方式均已接入该脚本的使用说明。
+  `-p` 指定 PID、`-l` 指定日志。
 
 ### v0.1.9
 
 - 安装方式扩展：新增 **GitHub 直装**、**源码 link 安装**、**plugin-registry** 三种
-  通道（含 `scripts/package-registry.mjs` 组装脚本与 registry 专用 client bundle）；
-- README 重构为完整安装矩阵（npm / GitHub / 源码 / registry）+ 更新说明 + FAQ。
+  通道（含 `scripts/package-registry.mjs` 组装脚本与 registry 专用 client bundle）。
 
 ### v0.1.7
 
