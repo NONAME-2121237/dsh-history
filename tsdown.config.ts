@@ -52,45 +52,59 @@ const hostConfig: UserConfig = {
   },
 }
 
-/** Client half: browser CJS closure factory registered through the module loader. */
-const clientConfig: UserConfig = {
-  entry: { client: 'src/client/index.ts' },
-  outDir: 'lib',
-  format: 'cjs',
-  platform: 'browser',
-  target: 'es2022',
-  dts: false,
-  sourcemap: true,
-  clean: false,
-  deps: {
-    neverBundle: [...CLIENT_EXTERNALS],
-    alwaysBundle: (id: string) => (CLIENT_EXTERNALS.includes(id) ? undefined : true),
-  },
-  define: {
-    'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),
-    'import.meta.env.MODE': JSON.stringify(process.env.NODE_ENV ?? 'production'),
-    'import.meta.env': JSON.stringify({ MODE: process.env.NODE_ENV ?? 'production' }),
-    'import.meta.resolve': 'undefined',
-  },
-  // CJS output otherwise makes some transitive packages resolve their
-  // Node entry even though this bundle runs in the browser. Keep browser
-  // conditional exports authoritative for both source import() and
-  // generated require() edges.
-  inputOptions: {
-    resolve: {
-      conditionNames: ['browser', 'import', 'require', 'default'],
+/**
+ * One client bundle build for a plugin id. The same src/client/index.ts is
+ * compiled twice with only the registered id and the output file name
+ * differing: the npm/GitHub channel uses the package name (`dsh-history`)
+ * and the plugin-registry channel uses the manifest id
+ * (`dsh-external/dsh-history`).
+ * @param pluginId - the `__ModuleLoader__.load({ id })` value of this bundle.
+ * @param entryFile - the output file name under lib/.
+ */
+function clientBundle(pluginId: string, entryFile: string): UserConfig {
+  return {
+    entry: { client: 'src/client/index.ts' },
+    outDir: 'lib',
+    format: 'cjs',
+    platform: 'browser',
+    target: 'es2022',
+    dts: false,
+    sourcemap: true,
+    clean: false,
+    deps: {
+      neverBundle: [...CLIENT_EXTERNALS],
+      alwaysBundle: (id: string) => (CLIENT_EXTERNALS.includes(id) ? undefined : true),
     },
-  },
-  outputOptions: {
-    entryFileNames: 'client.js',
-    banner: `window.__ModuleLoader__.load({ id: "dsh-history", factory: (require) => {`,
-    footer: `return module.exports; } });`,
-    intro: 'var module = { exports: {} }; var exports = module.exports;',
-    // The CJS wrapper factory's `require` only resolves module-table entries;
-    // it cannot load relative chunk URLs in the browser. Disable code
-    // splitting so every artifact is one script.
-    codeSplitting: false,
-  },
+    define: {
+      'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),
+      'import.meta.env.MODE': JSON.stringify(process.env.NODE_ENV ?? 'production'),
+      'import.meta.env': JSON.stringify({ MODE: process.env.NODE_ENV ?? 'production' }),
+      'import.meta.resolve': 'undefined',
+    },
+    // CJS output otherwise makes some transitive packages resolve their
+    // Node entry even though this bundle runs in the browser. Keep browser
+    // conditional exports authoritative for both source import() and
+    // generated require() edges.
+    inputOptions: {
+      resolve: {
+        conditionNames: ['browser', 'import', 'require', 'default'],
+      },
+    },
+    outputOptions: {
+      entryFileNames: entryFile,
+      banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(pluginId)}, factory: (require) => {`,
+      footer: `return module.exports; } });`,
+      intro: 'var module = { exports: {} }; var exports = module.exports;',
+      // The CJS wrapper factory's `require` only resolves module-table entries;
+      // it cannot load relative chunk URLs in the browser. Disable code
+      // splitting so every artifact is one script.
+      codeSplitting: false,
+    },
+  }
 }
 
-export default [hostConfig, clientConfig]
+export default [
+  hostConfig,
+  clientBundle('dsh-history', 'client.js'),
+  clientBundle('dsh-external/dsh-history', 'client-registry.js'),
+]
