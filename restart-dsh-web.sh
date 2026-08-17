@@ -49,14 +49,22 @@ if [ -z "$TARGET_PID" ] && command -v systemctl >/dev/null 2>&1 \
   fi
   echo "[systemd] 重启 dsh-web.service ..."
   systemctl restart dsh-web.service || { echo "[错误] systemctl restart 失败" >&2; exit 1; }
-  sleep 3
-  if systemctl is-active dsh-web.service >/dev/null 2>&1; then
-    echo "[systemd] dsh-web.service 运行中 ✓"
-  else
-    echo "[警告] dsh-web.service 重启后未激活，请查看: journalctl -u dsh-web.service -e" >&2
-    exit 1
-  fi
-  exit 0
+  # 轮询等待激活（DSH web 冷启动可能超过 3 秒）
+  WAIT=0
+  while [ "$WAIT" -lt 30 ]; do
+    if systemctl is-active dsh-web.service >/dev/null 2>&1; then
+      echo "[systemd] dsh-web.service 运行中 ✓（等待 ${WAIT}s）"
+      exit 0
+    fi
+    sleep 1
+    WAIT=$((WAIT + 1))
+  done
+  echo "[警告] dsh-web.service 重启后 30 秒内未激活，诊断信息如下:" >&2
+  echo "  --- systemctl status ---" >&2
+  systemctl status dsh-web.service --no-pager -l 2>&1 | head -20 >&2 || true
+  echo "  --- 最近日志 (journalctl -u dsh-web.service -n 30) ---" >&2
+  journalctl -u dsh-web.service -n 30 --no-pager 2>&1 | tail -30 >&2 || true
+  exit 1
 fi
 
 # ---- 发现运行中的 dsh web 进程（命令行含 dsh 且含独立令牌 web）----
