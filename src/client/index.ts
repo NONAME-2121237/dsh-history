@@ -595,12 +595,12 @@ function HistoryDock(props: HistoryDockProps & {
  * - 滚轮: 悬停轨道时滚动线条窗口; 移开后回弹到最近消息居中。
  */
 const TIMELINE_CSS = `
-.dsht_root{position:fixed;z-index:9980;width:16px;pointer-events:auto;user-select:none;-webkit-font-smoothing:antialiased}
-.dsht_track{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:space-between;padding:10px 0;
-  -webkit-mask-image:linear-gradient(to bottom,transparent 0,rgba(0,0,0,.85) 14%,#000 30%,#000 70%,rgba(0,0,0,.85) 86%,transparent 100%);
-  mask-image:linear-gradient(to bottom,transparent 0,rgba(0,0,0,.85) 14%,#000 30%,#000 70%,rgba(0,0,0,.85) 86%,transparent 100%)}
-.dsht_line{position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer;height:26px;flex:0 0 auto}
-.dsht_bar{width:3px;height:100%;border-radius:2px;background:var(--dsw-alias-label-caption, rgba(120,130,150,.55));opacity:.45;transition:background .15s ease,opacity .15s ease,transform .15s ease,box-shadow .15s ease}
+.dsht_root{position:fixed;z-index:9980;height:28px;pointer-events:auto;user-select:none;-webkit-font-smoothing:antialiased}
+.dsht_track{position:relative;display:flex;align-items:center;justify-content:center;gap:8px;height:28px;padding:0 4px;
+  -webkit-mask-image:linear-gradient(to right,transparent 0,rgba(0,0,0,.85) 12%,#000 30%,#000 70%,rgba(0,0,0,.85) 88%,transparent 100%);
+  mask-image:linear-gradient(to right,transparent 0,rgba(0,0,0,.85) 12%,#000 30%,#000 70%,rgba(0,0,0,.85) 88%,transparent 100%)}
+.dsht_line{position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer;width:26px;height:28px;flex:0 0 auto}
+.dsht_bar{width:26px;height:3px;border-radius:2px;background:var(--dsw-alias-label-caption, rgba(120,130,150,.55));opacity:.45;transition:background .15s ease,opacity .15s ease,transform .15s ease,box-shadow .15s ease}
 .dsht_line:hover .dsht_bar{opacity:.9;transform:scaleX(1.2)}
 .dsht_active .dsht_bar{background:var(--dsw-alias-state-business-primary, #3b82f6);opacity:1;box-shadow:0 0 6px var(--dsw-alias-state-business-primary, #3b82f6)}
 .dsht_flash .dsht_bar{animation:dshtFlashBar 1.6s ease-out}
@@ -630,7 +630,7 @@ function TimelineOverlay(props: HistoryDockProps & {
   const [activeSeq, setActiveSeq] = useState<number | null>(null)
   const [flashSeq, setFlashSeq] = useState<number | null>(null)
   const [retryAnchor, setRetryAnchor] = useState<number | null>(null)
-  const [pos, setPos] = useState<{ top: number; bottom: number; right: number } | null>(null)
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null)
   const [tip, setTip] = useState<{ turn: TurnItem; index: number; at: number } | null>(null)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const portRef = useRef<HTMLElement | null>(null)
@@ -750,9 +750,10 @@ function TimelineOverlay(props: HistoryDockProps & {
       const target = portNew ?? el.parentElement ?? el
       const r = target.getBoundingClientRect()
       const right = Math.max(4, window.innerWidth - r.right + 6)
-      const bottom = Math.max(4, window.innerHeight - r.bottom + 6)
-      setPos((prev) => (prev && prev.top === r.top && prev.bottom === bottom && prev.right === right ? prev : {
-        top: r.top, bottom, right,
+      // 轨道只占滚动容器右侧中部：垂直居中于可见区域（28px 高）。
+      const top = Math.max(4, r.top + r.height / 2 - 14)
+      setPos((prev) => (prev && prev.top === top && prev.right === right ? prev : {
+        top, right,
       }))
       if (portNew !== null && portRef.current === portNew) onScroll()
     }
@@ -773,7 +774,8 @@ function TimelineOverlay(props: HistoryDockProps & {
     }
   }, [seqByKey])
 
-  // Keep the window centered on the active turn (recent-message-centered).
+  // 窗口始终以 active 轮为中心（clamp 到窗口两端，靠近首/尾时不再居中，
+  // 保证不出现空滑/空白）。
   useEffect(() => {
     const list = turnsRef.current
     if (list.length === 0) return
@@ -781,8 +783,7 @@ function TimelineOverlay(props: HistoryDockProps & {
     const idx = activeIdx === -1 ? list.length - 1 : activeIdx
     const maxStart = Math.max(0, list.length - VISIBLE)
     const want = clamp(idx - Math.floor(VISIBLE / 2), 0, maxStart)
-    // Only recenter when the current window no longer contains the active line.
-    if (winStartRef.current > idx || winStartRef.current + VISIBLE <= idx) {
+    if (winStartRef.current !== want) {
       setWinStart(want)
     }
   }, [activeSeq, turns])
@@ -883,13 +884,11 @@ function TimelineOverlay(props: HistoryDockProps & {
       ref: (node: HTMLDivElement | null): void => {
         if (node === null || pos === null) return
         const r = node.getBoundingClientRect()
-        const flipTop = tip.at > 0 && r.bottom > window.innerHeight - 8
-        const flipBottom = tip.at > 0 && r.top < 8
-        node.style.top = `${flipTop ? Math.max(8, r.bottom - r.height - (r.bottom - window.innerHeight) - 8) : Math.max(8, Math.min(window.innerHeight - r.height - 8, r.top))}px`
-        node.style.right = `${Math.max(8, pos.right + 22)}px`
-        if (flipTop || flipBottom) {
-          node.style.top = `${flipTop ? window.innerHeight - r.height - 8 : 8}px`
-        }
+        // 默认显示在轨道上方；空间不足时翻转到下方。
+        let top = pos.top - r.height - 10
+        if (top < 8) top = pos.top + 28 + 10
+        node.style.top = `${top}px`
+        node.style.right = `${Math.max(8, pos.right)}px`
       },
     }, [
       createElement('div', { key: 'h', className: 'dsht_tipHead' }, [
@@ -909,7 +908,6 @@ function TimelineOverlay(props: HistoryDockProps & {
     className: 'dsht_root',
     style: pos !== null && count > 0 ? {
       top: pos.top,
-      bottom: pos.bottom,
       right: pos.right,
       visibility: count > 0 ? 'visible' : 'hidden',
     } : { visibility: 'hidden' },
