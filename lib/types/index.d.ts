@@ -38,6 +38,10 @@ interface HistorySessionEvent {
             kind?: string;
         };
         content?: readonly HistoryContentBlock[];
+        chunk?: {
+            type?: string;
+            text?: string;
+        };
     };
 }
 /** One content block (structural subset: the text/image/tool shapes). */

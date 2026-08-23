@@ -47,6 +47,7 @@ interface HistorySessionEvent {
   data?: {
     source?: { kind?: string }
     content?: readonly HistoryContentBlock[]
+    chunk?: { type?: string; text?: string }
   }
 }
 
@@ -315,6 +316,13 @@ function collectTurns(events: readonly HistorySessionEvent[]): TurnItem[] {
     if (ev.type === 'assistant/message') {
       const t = textOf(ev.data?.content)
       if (t !== '') cur.assistantText = cur.assistantText === '' ? t : `${cur.assistantText} ${t}`
+    } else if (ev.type === 'assistant/chunk') {
+      // Streaming text lives in text-delta chunks; reasoning deltas are the
+      // thinking block and must not appear in the preview (spec F3).
+      const chunk = ev.data?.chunk
+      if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text !== '') {
+        cur.assistantText += chunk.text
+      }
     } else if (ev.type === 'tool/call') {
       cur.toolCalls += 1
     }
