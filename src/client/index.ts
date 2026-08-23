@@ -629,6 +629,7 @@ function TimelineOverlay(props: HistoryDockProps & {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
   const [activeSeq, setActiveSeq] = useState<number | null>(null)
   const [flashSeq, setFlashSeq] = useState<number | null>(null)
+  const [retryAnchor, setRetryAnchor] = useState<number | null>(null)
   const [pos, setPos] = useState<{ top: number; bottom: number; right: number } | null>(null)
   const [tip, setTip] = useState<{ turn: TurnItem; index: number; at: number } | null>(null)
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -710,37 +711,26 @@ function TimelineOverlay(props: HistoryDockProps & {
         if (port === null) return
         const rect = port.getBoundingClientRect()
         if (rect.height === 0) return
-        // Refresh the seq → key map from the DOM (tool-call rows etc. included).
-        const domSeq: Map<number, string> = domSeqRef.current
-        domSeq.clear()
         const center = rect.top + rect.height * 0.42
         let best: HTMLElement | null = null
         let bestDist = Infinity
+        let bestSeq: number | undefined = undefined
         const rows = port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')
         for (let i = 0; i < rows.length; i++) {
           const r = rows[i]
           if (r === null) continue
           const key = r.dataset.chatAnchorKey
-          if (typeof key === 'string' && key !== '') {
-            const m = /^(\d+):/.exec(key)
-            if (m !== null && !domSeq.has(Number(m[1]))) domSeq.set(Number(m[1]), key)
-          }
+          // Only user/steering rows (whose anchor keys live in the loaded
+          // window map) participate; tool/assistant rows are skipped.
+          const seq = key !== undefined ? seqByKey.get(key) : undefined
+          if (seq === undefined) continue
           const rr = r.getBoundingClientRect()
           if (rr.bottom < rect.top - 60 || rr.top > rect.bottom + 60) continue
           const dist = Math.abs(rr.top + rr.height / 2 - center)
-          if (dist < bestDist) { bestDist = dist; best = r }
+          if (dist < bestDist) { bestDist = dist; best = r; bestSeq = seq }
         }
-        if (best !== null) {
-          const key = best.dataset.chatAnchorKey
-          let seq: number | undefined = undefined
-          if (key !== undefined) {
-            seq = seqByKey.get(key)
-            if (seq === undefined) {
-              const m = /^(\d+):/.exec(key)
-              if (m !== null) seq = Number(m[1])
-            }
-          }
-          if (seq !== undefined && turnsRef.current.some((t) => t.seq === seq)) setActiveSeq(seq)
+        if (best !== null && bestSeq !== undefined && turnsRef.current.some((t) => t.seq === bestSeq)) {
+          setActiveSeq(bestSeq)
         }
       })
     }
@@ -814,8 +804,33 @@ function TimelineOverlay(props: HistoryDockProps & {
   }
 
   const jumpToTurn = (turn: TurnItem): void => {
-    const key = keys.get(turn.seq) ?? domSeqRef.current.get(turn.seq)
-    if (key !== null && key !== undefined) {
+    const key = keys.get(turn.seq)
+    if (key === null || key === undefined) {
+      // 该轮用户消息不在已加载窗口内：尝试加载更早历史后再次定位。
+      if (typeof props.loadOlderFor === 'function' && props.session?.hasMore) {
+        props.loadOlderFor(String(sessionId)).then(() => {
+          setRetryAnchor(turn.seq)
+        }).catch(() => { /* keep silent */ })
+      }
+      return
+    }
+    if (findAnchor(key) !== null) scrollToKey(key)
+    setFlashSeq(turn.seq)
+    if (typeof props.timeout === 'function') {
+      props.timeout(() => setFlashSeq((cur) => (cur === turn.seq ? null : cur)), 1700)
+    } else {
+      setTimeout(() => setFlashSeq((cur) => (cur === turn.seq ? null : cur)), 1700)
+    }
+  }
+
+  // Retry a click-jump once its user row lands in the loaded window.
+  useEffect(() => {
+    if (retryAnchor === null) return
+    const turn = turnsRef.current.find((t) => t.seq === retryAnchor)
+    if (turn === undefined) return
+    const key = keys.get(turn.seq)
+    if (key !== undefined) {
+      setRetryAnchor(null)
       if (findAnchor(key) !== null) scrollToKey(key)
       setFlashSeq(turn.seq)
       if (typeof props.timeout === 'function') {
@@ -824,7 +839,7 @@ function TimelineOverlay(props: HistoryDockProps & {
         setTimeout(() => setFlashSeq((cur) => (cur === turn.seq ? null : cur)), 1700)
       }
     }
-  }
+  }, [keys, retryAnchor])
 
   const lineNodes: ReactElement[] = []
   for (let i = 0; i < shown.length; i++) {
