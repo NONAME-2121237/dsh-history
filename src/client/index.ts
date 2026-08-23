@@ -595,11 +595,11 @@ function HistoryDock(props: HistoryDockProps & {
  * - 滚轮: 悬停轨道时滚动线条窗口; 移开后回弹到最近消息居中。
  */
 const TIMELINE_CSS = `
-.dsht_root{position:fixed;z-index:9980;height:28px;pointer-events:auto;user-select:none;-webkit-font-smoothing:antialiased}
-.dsht_track{position:relative;display:flex;align-items:center;justify-content:center;gap:8px;height:28px;padding:0 4px;
-  -webkit-mask-image:linear-gradient(to right,transparent 0,rgba(0,0,0,.85) 12%,#000 30%,#000 70%,rgba(0,0,0,.85) 88%,transparent 100%);
-  mask-image:linear-gradient(to right,transparent 0,rgba(0,0,0,.85) 12%,#000 30%,#000 70%,rgba(0,0,0,.85) 88%,transparent 100%)}
-.dsht_line{position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer;width:26px;height:28px;flex:0 0 auto}
+.dsht_root{position:fixed;z-index:9980;pointer-events:auto;user-select:none;-webkit-font-smoothing:antialiased}
+.dsht_track{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:6px 4px;
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0,rgba(0,0,0,.85) 12%,#000 30%,#000 70%,rgba(0,0,0,.85) 88%,transparent 100%);
+  mask-image:linear-gradient(to bottom,transparent 0,rgba(0,0,0,.85) 12%,#000 30%,#000 70%,rgba(0,0,0,.85) 88%,transparent 100%)}
+.dsht_line{position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer;width:34px;height:3px;flex:0 0 auto;padding:6px 0}
 .dsht_bar{width:26px;height:3px;border-radius:2px;background:var(--dsw-alias-label-caption, rgba(120,130,150,.55));opacity:.45;transition:background .15s ease,opacity .15s ease,transform .15s ease,box-shadow .15s ease}
 .dsht_line:hover .dsht_bar{opacity:.9;transform:scaleX(1.2)}
 .dsht_active .dsht_bar{background:var(--dsw-alias-state-business-primary, #3b82f6);opacity:1;box-shadow:0 0 6px var(--dsw-alias-state-business-primary, #3b82f6)}
@@ -750,8 +750,8 @@ function TimelineOverlay(props: HistoryDockProps & {
       const target = portNew ?? el.parentElement ?? el
       const r = target.getBoundingClientRect()
       const right = Math.max(4, window.innerWidth - r.right + 6)
-      // 轨道只占滚动容器右侧中部：垂直居中于可见区域（28px 高）。
-      const top = Math.max(4, r.top + r.height / 2 - 14)
+      // 轨道是一列紧凑小横线，垂直居中于滚动容器（translateY(-50%) 由 CSS 承托）。
+      const top = Math.max(4, r.top + r.height / 2)
       setPos((prev) => (prev && prev.top === top && prev.right === right ? prev : {
         top, right,
       }))
@@ -884,11 +884,12 @@ function TimelineOverlay(props: HistoryDockProps & {
       ref: (node: HTMLDivElement | null): void => {
         if (node === null || pos === null) return
         const r = node.getBoundingClientRect()
-        // 默认显示在轨道上方；空间不足时翻转到下方。
-        let top = pos.top - r.height - 10
-        if (top < 8) top = pos.top + 28 + 10
-        node.style.top = `${top}px`
-        node.style.right = `${Math.max(8, pos.right)}px`
+        // 默认显示在轨道左侧；水平空间不足时翻到轨道右侧贴边。
+        let left = pos === null ? 0 : (window.innerWidth - pos.right - r.width - 34)
+        if (left < 8) left = Math.max(8, window.innerWidth - pos.right - r.width - 6)
+        node.style.left = `${left}px`
+        node.style.top = `${Math.max(8, Math.min(window.innerHeight - r.height - 8, pos.top - r.height / 2))}px`
+        node.style.right = 'auto'
       },
     }, [
       createElement('div', { key: 'h', className: 'dsht_tipHead' }, [
@@ -909,6 +910,7 @@ function TimelineOverlay(props: HistoryDockProps & {
     style: pos !== null && count > 0 ? {
       top: pos.top,
       right: pos.right,
+      transform: 'translateY(-50%)',
       visibility: count > 0 ? 'visible' : 'hidden',
     } : { visibility: 'hidden' },
     'aria-hidden': activeInWindow ? undefined : 'true',
