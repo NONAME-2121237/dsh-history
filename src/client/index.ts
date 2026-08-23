@@ -10,7 +10,7 @@
  * - `ctx.timer` for the copy-feedback restore.
  * Pure helpers live in ./util.ts; this file only renders and manages state.
  */
-import { createElement, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { createElement, Fragment, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import type { Context } from 'cordis'
 import {
   type HistoryConversationSnapshot,
@@ -884,9 +884,9 @@ function TimelineOverlay(props: HistoryDockProps & {
       ref: (node: HTMLDivElement | null): void => {
         if (node === null || pos === null) return
         const r = node.getBoundingClientRect()
-        // 默认显示在轨道左侧；水平空间不足时翻到轨道右侧贴边。
-        let left = pos === null ? 0 : (window.innerWidth - pos.right - r.width - 34)
-        if (left < 8) left = Math.max(8, window.innerWidth - pos.right - r.width - 6)
+        // 显示在轨道左侧；水平空间不足时贴右侧翻转。
+        let left = window.innerWidth - pos.right - r.width - 50
+        if (left < 8) left = Math.max(8, window.innerWidth - pos.right - r.width - 4)
         node.style.left = `${left}px`
         node.style.top = `${Math.max(8, Math.min(window.innerHeight - r.height - 8, pos.top - r.height / 2))}px`
         node.style.right = 'auto'
@@ -904,17 +904,20 @@ function TimelineOverlay(props: HistoryDockProps & {
     ])
   }
 
-  return createElement('div', {
-    ref: rootRef,
-    className: 'dsht_root',
-    style: pos !== null && count > 0 ? {
-      top: pos.top,
-      right: pos.right,
-      transform: 'translateY(-50%)',
-      visibility: count > 0 ? 'visible' : 'hidden',
-    } : { visibility: 'hidden' },
-    'aria-hidden': activeInWindow ? undefined : 'true',
-  }, [...children, tipNode === null ? [] : tipNode])
+  return createElement(Fragment, null, [
+    createElement('div', {
+      ref: rootRef,
+      className: 'dsht_root',
+      style: pos !== null && count > 0 ? {
+        top: pos.top,
+        right: pos.right,
+        transform: 'translateY(-50%)',
+        visibility: count > 0 ? 'visible' : 'hidden',
+      } : { visibility: 'hidden' },
+      'aria-hidden': activeInWindow ? undefined : 'true',
+    }, children),
+    tipNode === null ? [] : tipNode,
+  ])
 }
 
 /** ------------------------------------------------------------------ plugin */
