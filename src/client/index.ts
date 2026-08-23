@@ -637,6 +637,11 @@ function TimelineOverlay(props: HistoryDockProps & {
   winStartRef.current = winStart
   const turnsRef = useRef(turns)
   turnsRef.current = turns
+  // DOM-derived seq → anchor key map: message rows carry keys like
+  // "12:tool-call<callId>" / "12:user..." whose leading integer is the seq;
+  // the loaded-window map only covers user/steering nodes, so tool rows
+  // (active-hint) and older pages (click-jump) still resolve.
+  const domSeqRef = useRef(new Map<number, string>())
 
   const VISIBLE = 10
 
@@ -705,6 +710,9 @@ function TimelineOverlay(props: HistoryDockProps & {
         if (port === null) return
         const rect = port.getBoundingClientRect()
         if (rect.height === 0) return
+        // Refresh the seq → key map from the DOM (tool-call rows etc. included).
+        const domSeq: Map<number, string> = domSeqRef.current
+        domSeq.clear()
         const center = rect.top + rect.height * 0.42
         let best: HTMLElement | null = null
         let bestDist = Infinity
@@ -712,6 +720,11 @@ function TimelineOverlay(props: HistoryDockProps & {
         for (let i = 0; i < rows.length; i++) {
           const r = rows[i]
           if (r === null) continue
+          const key = r.dataset.chatAnchorKey
+          if (typeof key === 'string' && key !== '') {
+            const m = /^(\d+):/.exec(key)
+            if (m !== null && !domSeq.has(Number(m[1]))) domSeq.set(Number(m[1]), key)
+          }
           const rr = r.getBoundingClientRect()
           if (rr.bottom < rect.top - 60 || rr.top > rect.bottom + 60) continue
           const dist = Math.abs(rr.top + rr.height / 2 - center)
@@ -719,8 +732,15 @@ function TimelineOverlay(props: HistoryDockProps & {
         }
         if (best !== null) {
           const key = best.dataset.chatAnchorKey
-          const seq = key !== undefined ? seqByKey.get(key) : undefined
-          if (seq !== undefined) setActiveSeq(seq)
+          let seq: number | undefined = undefined
+          if (key !== undefined) {
+            seq = seqByKey.get(key)
+            if (seq === undefined) {
+              const m = /^(\d+):/.exec(key)
+              if (m !== null) seq = Number(m[1])
+            }
+          }
+          if (seq !== undefined && turnsRef.current.some((t) => t.seq === seq)) setActiveSeq(seq)
         }
       })
     }
@@ -794,7 +814,7 @@ function TimelineOverlay(props: HistoryDockProps & {
   }
 
   const jumpToTurn = (turn: TurnItem): void => {
-    const key = keys.get(turn.seq)
+    const key = keys.get(turn.seq) ?? domSeqRef.current.get(turn.seq)
     if (key !== null && key !== undefined) {
       if (findAnchor(key) !== null) scrollToKey(key)
       setFlashSeq(turn.seq)
