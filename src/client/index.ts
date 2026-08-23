@@ -638,11 +638,11 @@ function TimelineOverlay(props: HistoryDockProps & {
   winStartRef.current = winStart
   const turnsRef = useRef(turns)
   turnsRef.current = turns
-  // DOM-derived seq → anchor key map: message rows carry keys like
-  // "12:tool-call<callId>" / "12:user..." whose leading integer is the seq;
-  // the loaded-window map only covers user/steering nodes, so tool rows
-  // (active-hint) and older pages (click-jump) still resolve.
-  const domSeqRef = useRef(new Map<number, string>())
+  // DOM-derived turn-number → anchor key map: rows carry keys like
+  // "13:input-message<uuid>" / "13:tool-callxxx" whose leading integer is
+  // the engine's 1-based turn number (= our turn index + 1). Click-jump
+  // falls back to this map when the loaded-window seq map misses the turn.
+  const domTurnRef = useRef(new Map<number, string>())
 
   const VISIBLE = 10
 
@@ -712,25 +712,29 @@ function TimelineOverlay(props: HistoryDockProps & {
         const rect = port.getBoundingClientRect()
         if (rect.height === 0) return
         const center = rect.top + rect.height * 0.42
-        let best: HTMLElement | null = null
+        const turnsList = turnsRef.current
+        let bestTurn: number | null = null
         let bestDist = Infinity
-        let bestSeq: number | undefined = undefined
+        const domTurn = domTurnRef.current
         const rows = port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')
         for (let i = 0; i < rows.length; i++) {
           const r = rows[i]
           if (r === null) continue
           const key = r.dataset.chatAnchorKey
-          // Only user/steering rows (whose anchor keys live in the loaded
-          // window map) participate; tool/assistant rows are skipped.
-          const seq = key !== undefined ? seqByKey.get(key) : undefined
-          if (seq === undefined) continue
+          if (typeof key !== 'string' || key === '') continue
+          const m = /^(\d+):/.exec(key)
+          if (m === null) continue
+          const n = Number(m[1])
+          const idx = n - 1
+          if (idx < 0 || idx >= turnsList.length) continue
+          if (!domTurn.has(n)) domTurn.set(n, key)
           const rr = r.getBoundingClientRect()
           if (rr.bottom < rect.top - 60 || rr.top > rect.bottom + 60) continue
           const dist = Math.abs(rr.top + rr.height / 2 - center)
-          if (dist < bestDist) { bestDist = dist; best = r; bestSeq = seq }
+          if (dist < bestDist) { bestDist = dist; bestTurn = n }
         }
-        if (best !== null && bestSeq !== undefined && turnsRef.current.some((t) => t.seq === bestSeq)) {
-          setActiveSeq(bestSeq)
+        if (bestTurn !== null) {
+          setActiveSeq(turnsList[bestTurn - 1].seq)
         }
       })
     }
@@ -804,7 +808,8 @@ function TimelineOverlay(props: HistoryDockProps & {
   }
 
   const jumpToTurn = (turn: TurnItem): void => {
-    const key = keys.get(turn.seq)
+    const idx = turnsRef.current.findIndex((t) => t.seq === turn.seq)
+    const key = keys.get(turn.seq) ?? domTurnRef.current.get(idx + 1)
     if (key === null || key === undefined) {
       // 该轮用户消息不在已加载窗口内：尝试加载更早历史后再次定位。
       if (typeof props.loadOlderFor === 'function' && props.session?.hasMore) {
