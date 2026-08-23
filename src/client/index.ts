@@ -736,8 +736,9 @@ function TimelineOverlay(props: HistoryDockProps & {
       const target = portNew ?? el.parentElement ?? el
       const r = target.getBoundingClientRect()
       const right = Math.max(4, window.innerWidth - r.right + 6)
-      setPos((prev) => (prev && prev.top === r.top && prev.bottom === r.bottom && prev.right === right ? prev : {
-        top: r.top, bottom: r.bottom, right,
+      const bottom = Math.max(4, window.innerHeight - r.bottom + 6)
+      setPos((prev) => (prev && prev.top === r.top && prev.bottom === bottom && prev.right === right ? prev : {
+        top: r.top, bottom, right,
       }))
       if (portNew !== null && portRef.current === portNew) onScroll()
     }
