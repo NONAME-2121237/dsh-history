@@ -29,6 +29,22 @@ export interface HistoryRow {
     text: string;
     key: string | null;
 }
+/** One interaction turn from the host `/history/api/list-turns` route. */
+export interface TurnItem {
+    seq: number;
+    time: number;
+    userText: string;
+    userAttachments: number;
+    assistantText: string;
+    toolCalls: number;
+}
+/** Truncate a string to at most `max` code units with an ellipsis. */
+export declare function truncate(text: string, max: number): string;
+/** Clamp a number into [min, max]. */
+export declare function clamp(n: number, min: number, max: number): number;
+/** Find the nearest overflow-y scroll ancestor of an element (the message
+ *  viewport for rows inside the conversation). */
+export declare function findScrollPort(el: HTMLElement): HTMLElement | null;
 /** The conversation snapshot slice this plugin reads (structural subset). */
 export interface HistoryConversationSnapshot {
     sessionId?: string;

@@ -15,11 +15,15 @@ import type { Context } from 'cordis'
 import {
   type HistoryConversationSnapshot,
   type HistoryRow,
+  type TurnItem,
+  clamp,
   collectWindowItems,
   copyText,
   findAnchor,
+  findScrollPort,
   fmtTime,
   scrollToKey,
+  truncate,
 } from './util'
 
 /** ------------------------------------------------------------------ types */
@@ -128,7 +132,7 @@ function injectStyles(): () => void {
   const tag = document.createElement('style')
   tag.dataset.plugin = 'dsh-history'
   tag.dataset.pluginCss = 'dsh-history/styles'
-  tag.textContent = CSS
+  tag.textContent = CSS + TIMELINE_CSS
   document.head.appendChild(tag)
   return () => {
     if (tag.parentNode !== null) tag.parentNode.removeChild(tag)
@@ -579,6 +583,287 @@ function HistoryDock(props: HistoryDockProps & {
   return createElement('div', { className: 'dshm_root' }, children)
 }
 
+/** ------------------------------------------------------------------ timeline */
+
+/**
+ * 交互时间线 (spec F2-F5): 消息区右缘的轮次刻度轨道。
+ * - 一根线 = 用户发出一次消息 (一个轮次); 最新轮次在底部 (正序)。
+ * - 最多显示 10 根, 轨道内等距; 窗口外的线不渲染, 上下边缘以渐变淡出。
+ * - 当前视口最近的轮次高亮为蓝色; 历史为白色。
+ * - 悬停: tooltip 预览 (第 N 轮 / 时间 / 用户消息 / 回复 + 工具数), 自动翻转防溢出。
+ * - 点击: 滚动到该轮用户消息, 线条短暂高亮。
+ * - 滚轮: 悬停轨道时滚动线条窗口; 移开后回弹到最近消息居中。
+ */
+const TIMELINE_CSS = `
+.dsht_root{position:fixed;z-index:9980;width:16px;pointer-events:auto;user-select:none;-webkit-font-smoothing:antialiased}
+.dsht_track{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:space-between;padding:10px 0;
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0,rgba(0,0,0,.85) 14%,#000 30%,#000 70%,rgba(0,0,0,.85) 86%,transparent 100%);
+  mask-image:linear-gradient(to bottom,transparent 0,rgba(0,0,0,.85) 14%,#000 30%,#000 70%,rgba(0,0,0,.85) 86%,transparent 100%)}
+.dsht_line{position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer;height:26px;flex:0 0 auto}
+.dsht_bar{width:3px;height:100%;border-radius:2px;background:var(--dsw-alias-label-caption, rgba(120,130,150,.55));opacity:.45;transition:background .15s ease,opacity .15s ease,transform .15s ease,box-shadow .15s ease}
+.dsht_line:hover .dsht_bar{opacity:.9;transform:scaleX(1.2)}
+.dsht_active .dsht_bar{background:var(--dsw-alias-state-business-primary, #3b82f6);opacity:1;box-shadow:0 0 6px var(--dsw-alias-state-business-primary, #3b82f6)}
+.dsht_flash .dsht_bar{animation:dshtFlashBar 1.6s ease-out}
+@keyframes dshtFlashBar{0%,30%{background:var(--dsw-alias-state-business-primary, #3b82f6);opacity:1;box-shadow:0 0 10px var(--dsw-alias-state-business-primary, #3b82f6)}100%{opacity:.45;box-shadow:none}}
+.dsht_tip{position:fixed;z-index:9999;max-width:min(340px,calc(100vw - 24px));border-radius:12px;padding:10px 12px;font-size:12px;line-height:1.55;
+  background:rgba(255,255,255,.92);-webkit-backdrop-filter:blur(16px) saturate(1.4);backdrop-filter:blur(16px) saturate(1.4);
+  border:1px solid rgba(120,130,150,.28);box-shadow:0 10px 32px rgba(0,0,0,.14);color:#1f2937;pointer-events:none}
+.dsht_tipHead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:5px}
+.dsht_tipSeq{font-size:12px;font-weight:700}
+.dsht_tipTime{font-size:11px;opacity:.6;font-variant-numeric:tabular-nums}
+.dsht_tipLabel{font-size:10px;font-weight:600;opacity:.55;margin:6px 0 2px;letter-spacing:.04em}
+.dsht_tipBody{white-space:pre-wrap;word-break:break-word;opacity:.92}
+.dsht_tipMeta{margin-top:4px;font-size:11px;opacity:.8}
+html[data-ds-dark-theme="dark"] .dsht_tip{background:rgba(22,24,31,.9);border-color:rgba(255,255,255,.14);color:#e5e7eb}
+`
+
+/** Timeline overlay: the right-edge turn-rail (spec F2-F5). */
+function TimelineOverlay(props: HistoryDockProps & {
+  loadOlderFor?: (id: string) => Promise<void>
+  timeout?: HistoryTimer['timeout']
+}): ReactElement {
+  const session = props.session
+  const sessionId = session?.sessionId
+  const [turns, setTurns] = useState<TurnItem[]>([])
+  const [winStart, setWinStart] = useState(0)
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null)
+  const [activeSeq, setActiveSeq] = useState<number | null>(null)
+  const [flashSeq, setFlashSeq] = useState<number | null>(null)
+  const [pos, setPos] = useState<{ top: number; bottom: number; right: number } | null>(null)
+  const [tip, setTip] = useState<{ turn: TurnItem; index: number; at: number } | null>(null)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const portRef = useRef<HTMLElement | null>(null)
+  const winStartRef = useRef(winStart)
+  winStartRef.current = winStart
+  const turnsRef = useRef(turns)
+  turnsRef.current = turns
+
+  const VISIBLE = 10
+
+  // seq → anchor key map from the loaded window (for click-jump).
+  const keys = useMemo(() => collectWindowItems(session).keys, [session])
+  const seqByKey = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const [seq, key] of keys) if (key !== null) m.set(key, seq)
+    return m
+  }, [keys])
+
+  // Poll the turn list; the host cache (3s TTL) keeps this cheap.
+  useEffect(() => {
+    if (sessionId === undefined) return
+    let cancelled = false
+    const load = (): void => {
+      fetch('/history/api/list-turns', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: String(sessionId) }),
+        cache: 'no-store',
+      })
+        .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+        .then((data: unknown) => {
+          if (cancelled) return
+          const record = data as { ok?: boolean; turns?: TurnItem[] }
+          if (record && record.ok === true && Array.isArray(record.turns)) setTurns(record.turns)
+        })
+        .catch(() => { /* keep last known state */ })
+    }
+    load()
+    const timer = setInterval(load, 3000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [sessionId])
+
+  // Geometry: pin the rail to the message viewport's right edge. The dock
+  // slot is the official container; geometry follows the scrollport via
+  // ResizeObserver + scroll, so sidebars/bottom bars cannot cover us.
+  useEffect(() => {
+    const el = rootRef.current
+    if (!el) return
+    let port: HTMLElement | null = null
+    const row = document.querySelector<HTMLElement>('[data-chat-anchor-key]')
+    if (row !== null) port = findScrollPort(row)
+    if (port === null) {
+      for (let node: HTMLElement | null = el; node !== null; node = node.parentElement) {
+        if (node.hasAttribute && node.hasAttribute('data-composer-seat') && node.parentElement !== null) {
+          port = findScrollPort(node.parentElement)
+          break
+        }
+      }
+    }
+    portRef.current = port
+    const update = (): void => {
+      const target = port ?? el.parentElement ?? el
+      const r = target.getBoundingClientRect()
+      const right = Math.max(4, window.innerWidth - r.right + 6)
+      setPos((prev) => (prev && prev.top === r.top && prev.bottom === r.bottom && prev.right === right ? prev : {
+        top: r.top, bottom: r.bottom, right,
+      }))
+    }
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null
+    ro?.observe(port ?? el)
+    window.addEventListener('resize', update)
+    port?.addEventListener('scroll', update, { passive: true })
+    update()
+    return () => {
+      ro?.disconnect()
+      window.removeEventListener('resize', update)
+      port?.removeEventListener('scroll', update)
+    }
+  }, [])
+
+  // Scroll tracking: the turn nearest the viewport's upper-middle turns blue.
+  useEffect(() => {
+    const port = portRef.current
+    if (port === null) return
+    let raf = 0
+    const onScroll = (): void => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        const rect = port.getBoundingClientRect()
+        const center = rect.top + rect.height * 0.42
+        let best: HTMLElement | null = null
+        let bestDist = Infinity
+        const rows = port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i]
+          if (r === null) continue
+          const rr = r.getBoundingClientRect()
+          if (rr.bottom < rect.top - 60 || rr.top > rect.bottom + 60) continue
+          const dist = Math.abs(rr.top + rr.height / 2 - center)
+          if (dist < bestDist) { bestDist = dist; best = r }
+        }
+        if (best !== null) {
+          const key = best.dataset.chatAnchorKey
+          const seq = key !== undefined ? seqByKey.get(key) : undefined
+          if (seq !== undefined) setActiveSeq(seq)
+        }
+      })
+    }
+    port.addEventListener('scroll', onScroll, { passive: true })
+    onScroll()
+    return () => {
+      port.removeEventListener('scroll', onScroll)
+      cancelAnimationFrame(raf)
+    }
+  }, [seqByKey, session])
+
+  // Keep the window centered on the active turn (recent-message-centered).
+  useEffect(() => {
+    const list = turnsRef.current
+    if (list.length === 0) return
+    const activeIdx = activeSeq === null ? list.length - 1 : list.findIndex((t) => t.seq === activeSeq)
+    const idx = activeIdx === -1 ? list.length - 1 : activeIdx
+    const maxStart = Math.max(0, list.length - VISIBLE)
+    const want = clamp(idx - Math.floor(VISIBLE / 2), 0, maxStart)
+    // Only recenter when the current window no longer contains the active line.
+    if (winStartRef.current > idx || winStartRef.current + VISIBLE <= idx) {
+      setWinStart(want)
+    }
+  }, [activeSeq, turns])
+
+  const count = turns.length
+  const maxStart = Math.max(0, count - VISIBLE)
+  const shown = turns.slice(winStart, winStart + VISIBLE)
+  const activeIdx = activeSeq === null ? -1 : turns.findIndex((t) => t.seq === activeSeq)
+  const activeInWindow = activeIdx >= winStart && activeIdx < winStart + VISIBLE
+
+  const handleWheel = (e: { deltaY: number; preventDefault(): void }): void => {
+    e.preventDefault()
+    const step = e.deltaY > 0 ? 1 : -1
+    setWinStart((s) => clamp(s + step, 0, maxStart))
+  }
+
+  const recenter = (): void => {
+    const list = turnsRef.current
+    if (list.length === 0) return
+    const idx = activeSeq === null ? list.length - 1 : Math.max(0, list.findIndex((t) => t.seq === activeSeq))
+    const i = idx === -1 ? list.length - 1 : idx
+    setWinStart(clamp(i - Math.floor(VISIBLE / 2), 0, Math.max(0, list.length - VISIBLE)))
+  }
+
+  const jumpToTurn = (turn: TurnItem): void => {
+    const key = keys.get(turn.seq)
+    if (key !== null && key !== undefined) {
+      if (findAnchor(key) !== null) scrollToKey(key)
+      setFlashSeq(turn.seq)
+      if (typeof props.timeout === 'function') {
+        props.timeout(() => setFlashSeq((cur) => (cur === turn.seq ? null : cur)), 1700)
+      } else {
+        setTimeout(() => setFlashSeq((cur) => (cur === turn.seq ? null : cur)), 1700)
+      }
+    }
+  }
+
+  const lineNodes: ReactElement[] = []
+  for (let i = 0; i < shown.length; i++) {
+    const turn = shown[i]
+    const idx = winStart + i
+    const isActive = activeIdx === idx
+    const isFlash = flashSeq === turn.seq
+    lineNodes.push(createElement('div', {
+      key: `t${turn.seq}`,
+      className: `dsht_line${isActive ? ' dsht_active' : ''}${isFlash ? ' dsht_flash' : ''}`,
+      'aria-label': `第 ${idx + 1} 轮`,
+      onMouseEnter: () => { setHoverIdx(idx); setTip({ turn, index: idx, at: Date.now() }) },
+      onMouseLeave: () => { setHoverIdx(null); setTip(null) },
+      onClick: () => jumpToTurn(turn),
+    }, createElement('span', { className: 'dsht_bar' })))
+  }
+
+  const children: ReactElement[] = [
+    createElement('div', {
+      key: 'track',
+      className: 'dsht_track',
+      onWheel: handleWheel,
+      onMouseLeave: () => { recenter(); setHoverIdx(null); setTip(null) },
+    }, lineNodes),
+  ]
+
+  // Tooltip: render once per hovered line; auto-flip so it never leaves the viewport.
+  let tipNode: ReactElement | null = null
+  if (tip !== null && hoverIdx === tip.index) {
+    const n = tip.index + 1
+    const attach = tip.turn.userAttachments > 0 ? `（含 ${tip.turn.userAttachments} 张图片/附件）` : ''
+    const tools = tip.turn.toolCalls > 0 ? `\n调用了 ${tip.turn.toolCalls} 次工具` : ''
+    tipNode = createElement('div', {
+      key: 'tip',
+      className: 'dsht_tip',
+      ref: (node: HTMLDivElement | null): void => {
+        if (node === null || pos === null) return
+        const r = node.getBoundingClientRect()
+        const flipTop = tip.at > 0 && r.bottom > window.innerHeight - 8
+        const flipBottom = tip.at > 0 && r.top < 8
+        node.style.top = `${flipTop ? Math.max(8, r.bottom - r.height - (r.bottom - window.innerHeight) - 8) : Math.max(8, Math.min(window.innerHeight - r.height - 8, r.top))}px`
+        node.style.right = `${Math.max(8, pos.right + 22)}px`
+        if (flipTop || flipBottom) {
+          node.style.top = `${flipTop ? window.innerHeight - r.height - 8 : 8}px`
+        }
+      },
+    }, [
+      createElement('div', { key: 'h', className: 'dsht_tipHead' }, [
+        createElement('span', { key: 'seq', className: 'dsht_tipSeq' }, `第 ${n} 轮`),
+        createElement('span', { key: 'time', className: 'dsht_tipTime' }, fmtTime(tip.turn.time)),
+      ]),
+      createElement('div', { key: 'u', className: 'dsht_tipLabel' }, '用户'),
+      createElement('div', { key: 'ut', className: 'dsht_tipBody' }, truncate(tip.turn.userText || '(无文本)', 200)),
+      createElement('div', { key: 'a', className: 'dsht_tipLabel' }, 'Agent'),
+      createElement('div', { key: 'at', className: 'dsht_tipBody' }, truncate(tip.turn.assistantText || '(暂无回复)', 200)),
+      createElement('div', { key: 'meta', className: 'dsht_tipMeta' }, `${attach}${tools}`.trim()),
+    ])
+  }
+
+  return createElement('div', {
+    ref: rootRef,
+    className: 'dsht_root',
+    style: pos !== null && count > 0 ? {
+      top: pos.top,
+      bottom: pos.bottom,
+      right: pos.right,
+      visibility: count > 0 ? 'visible' : 'hidden',
+    } : { visibility: 'hidden' },
+    'aria-hidden': activeInWindow ? undefined : 'true',
+  }, [...children, tipNode === null ? [] : tipNode])
+}
+
 /** ------------------------------------------------------------------ plugin */
 
 /** Services required before mounting: the slot registry. */
@@ -610,6 +895,14 @@ export function apply(ctx: Context): void {
       timeout,
       useInput: props.useInput as HistoryDockProps['useInput'],
       inputActions: props.inputActions as HistoryDockProps['inputActions'],
+    }),
+  ))
+  slots.inject('conversation.input.dock', () => slots.register(
+    { name: 'conversation.input.dock', id: 'dsh-history-timeline', order: 40 },
+    (props: HistoryDockProps) => createElement(TimelineOverlay, {
+      session: props.session,
+      loadOlderFor,
+      timeout,
     }),
   ))
 }

@@ -69,6 +69,25 @@ interface HistoryErr {
   error: string
 }
 
+/** One interaction turn: a user message (plus any steering) through to the
+ *  next user message — the agent reply text and tool-call count belong to
+ *  the turn they fall inside (see spec F2). */
+interface TurnItem {
+  seq: number
+  time: number
+  userText: string
+  userAttachments: number
+  assistantText: string
+  toolCalls: number
+}
+
+/** The wire envelope for the turn list. */
+interface TurnsOk {
+  ok: true
+  turns: TurnItem[]
+  total: number
+}
+
 declare module 'cordis' {
   interface Context {
     webServer: HistoryWebServer
@@ -249,6 +268,99 @@ function collectUserMessages(events: readonly HistorySessionEvent[]): { seq: num
   return items
 }
 
+/** Count non-text content blocks (images / attachments) in one message. */
+function attachmentCount(content: readonly HistoryContentBlock[] | undefined): number {
+  if (!Array.isArray(content)) return 0
+  let n = 0
+  for (const b of content) {
+    if (b && typeof b.type === 'string' && b.type !== 'text') n++
+  }
+  return n
+}
+
+/**
+ * Build the interaction-turn list from one event log (spec F2): a new turn
+ * opens at every human `user/message`; a following `steering` user message
+ * joins the same turn; `assistant/message` text and `tool/call` events
+ * accumulate into the turn they fall inside. Seq-ascending output.
+ */
+function collectTurns(events: readonly HistorySessionEvent[]): TurnItem[] {
+  const turns: TurnItem[] = []
+  let cur: TurnItem | null = null
+  for (const ev of events) {
+    if (!ev || typeof ev.seq !== 'number') continue
+    const source = ev.data?.source
+    const kind = source?.kind
+    if (ev.type === 'user/message') {
+      if (kind === 'user') {
+        cur = {
+          seq: ev.seq,
+          time: typeof ev.time === 'number' ? ev.time : 0,
+          userText: textOf(ev.data?.content),
+          userAttachments: attachmentCount(ev.data?.content),
+          assistantText: '',
+          toolCalls: 0,
+        }
+        turns.push(cur)
+        continue
+      }
+      // Steering belongs to the open turn's user part.
+      if (kind === 'steering' && cur !== null) {
+        const t = textOf(ev.data?.content)
+        if (t !== '') cur.userText = cur.userText === '' ? t : `${cur.userText} ${t}`
+        continue
+      }
+    }
+    if (cur === null) continue
+    if (ev.type === 'assistant/message') {
+      const t = textOf(ev.data?.content)
+      if (t !== '') cur.assistantText = cur.assistantText === '' ? t : `${cur.assistantText} ${t}`
+    } else if (ev.type === 'tool/call') {
+      cur.toolCalls += 1
+    }
+  }
+  return turns
+}
+
+/** Per-session turn-list cache (mirrors the user-message cache). */
+const turnCache = new Map<string, { at: number; turns: TurnItem[] }>()
+
+const TURN_CACHE_TTL = 3000
+const TURN_CACHE_MAX = 50
+
+/** One API method dispatch: full turn list for the timeline (spec F2-F5). */
+async function listTurns(ctx: Context, payload: unknown): Promise<TurnsOk | HistoryErr> {
+  const record = payload as { sessionId?: unknown } | null
+  const sessionId = record?.sessionId
+  if (typeof sessionId !== 'string' || sessionId === '') {
+    return { ok: false, error: '缺少 sessionId' }
+  }
+  const cached = turnCache.get(sessionId)
+  if (cached !== undefined && Date.now() - cached.at < TURN_CACHE_TTL) {
+    return { ok: true, turns: cached.turns, total: cached.turns.length }
+  }
+  let events: readonly HistorySessionEvent[] | undefined
+  const sessions = ctx.get('sessions') as HistorySessionStore | undefined
+  events = sessions?.get(sessionId)?.events
+  if (events === undefined) {
+    const sessionQuery = ctx.get('sessionQuery') as HistorySessionQuery | undefined
+    if (sessionQuery === undefined) return { ok: false, error: 'sessionQuery 服务不可用' }
+    try {
+      const snapshot = await sessionQuery.readSession(sessionId)
+      events = snapshot && Array.isArray(snapshot.events) ? snapshot.events : []
+    } catch (err) {
+      return { ok: false, error: String(err instanceof Error ? err.message : err) }
+    }
+  }
+  const turns = collectTurns(events ?? [])
+  if (turnCache.size >= TURN_CACHE_MAX) {
+    const oldest = turnCache.keys().next().value
+    if (oldest !== undefined) turnCache.delete(oldest)
+  }
+  turnCache.set(sessionId, { at: Date.now(), turns })
+  return { ok: true, turns, total: turns.length }
+}
+
 /** Write a JSON response with the given status. */
 function writeJson(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body)
@@ -279,17 +391,27 @@ export function apply(ctx: Context): void {
         writeJson(res, 404, { ok: false, error: 'unknown history API method' })
         return
       }
-      if (method !== 'list-user-messages') {
-        writeJson(res, 404, { ok: false, error: `unknown history API method "${method}"` })
+      if (method === 'list-user-messages') {
+        try {
+          const payload = await readJsonBody(req)
+          const result = await listUserMessages(ctx, payload)
+          writeJson(res, result.ok ? 200 : 400, result)
+        } catch (err) {
+          writeJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) })
+        }
         return
       }
-      try {
-        const payload = await readJsonBody(req)
-        const result = await listUserMessages(ctx, payload)
-        writeJson(res, result.ok ? 200 : 400, result)
-      } catch (err) {
-        writeJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) })
+      if (method === 'list-turns') {
+        try {
+          const payload = await readJsonBody(req)
+          const result = await listTurns(ctx, payload)
+          writeJson(res, result.ok ? 200 : 400, result)
+        } catch (err) {
+          writeJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) })
+        }
+        return
       }
+      writeJson(res, 404, { ok: false, error: `unknown history API method "${method}"` })
     },
   }), 'dsh-history: /history/api route')
 }

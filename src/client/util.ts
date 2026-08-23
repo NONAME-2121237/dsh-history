@@ -33,6 +33,40 @@ export interface HistoryRow {
   key: string | null
 }
 
+/** One interaction turn from the host `/history/api/list-turns` route. */
+export interface TurnItem {
+  seq: number
+  time: number
+  userText: string
+  userAttachments: number
+  assistantText: string
+  toolCalls: number
+}
+
+/** Truncate a string to at most `max` code units with an ellipsis. */
+export function truncate(text: string, max: number): string {
+  if (!text) return ''
+  if (text.length <= max) return text
+  return `${text.slice(0, max)}…`
+}
+
+/** Clamp a number into [min, max]. */
+export function clamp(n: number, min: number, max: number): number {
+  return n < min ? min : (n > max ? max : n)
+}
+
+/** Find the nearest overflow-y scroll ancestor of an element (the message
+ *  viewport for rows inside the conversation). */
+export function findScrollPort(el: HTMLElement): HTMLElement | null {
+  let node: HTMLElement | null = el.parentElement
+  while (node !== null) {
+    const overflow = getComputedStyle(node).overflowY
+    if (overflow === 'auto' || overflow === 'scroll' || overflow === 'overlay') return node
+    node = node.parentElement
+  }
+  return null
+}
+
 /** The conversation snapshot slice this plugin reads (structural subset). */
 export interface HistoryConversationSnapshot {
   sessionId?: string
