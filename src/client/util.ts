@@ -56,9 +56,10 @@ export function clamp(n: number, min: number, max: number): number {
 }
 
 /** Find the nearest overflow-y scroll ancestor of an element (the message
- *  viewport for rows inside the conversation). */
-export function findScrollPort(el: HTMLElement): HTMLElement | null {
-  let node: HTMLElement | null = el.parentElement
+ *  viewport for rows inside the conversation). Pass `includeSelf` to also
+ *  accept the element itself when it is the scrollport. */
+export function findScrollPort(el: HTMLElement, includeSelf = false): HTMLElement | null {
+  let node: HTMLElement | null = includeSelf ? el : el.parentElement
   while (node !== null) {
     const overflow = getComputedStyle(node).overflowY
     if (overflow === 'auto' || overflow === 'scroll' || overflow === 'overlay') return node

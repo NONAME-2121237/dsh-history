@@ -672,53 +672,39 @@ function TimelineOverlay(props: HistoryDockProps & {
     return () => { cancelled = true; clearInterval(timer) }
   }, [sessionId])
 
-  // Geometry: pin the rail to the message viewport's right edge. The dock
-  // slot is the official container; geometry follows the scrollport via
-  // ResizeObserver + scroll, so sidebars/bottom bars cannot cover us.
+  // Geometry + active-turn tracking: pin the rail to the message viewport's
+  // right edge. The message rows may not have rendered yet at mount time, so
+  // the scrollport is re-resolved on every update; the fallback chain is
+  // message-row scrollport → composer-seat parent (the message scroll body)
+  // → dock container. ResizeObserver + scroll + a slow poll keep the rail
+  // following sidebar/bottom-bar layout changes.
   useEffect(() => {
     const el = rootRef.current
     if (!el) return
-    let port: HTMLElement | null = null
-    const row = document.querySelector<HTMLElement>('[data-chat-anchor-key]')
-    if (row !== null) port = findScrollPort(row)
-    if (port === null) {
-      for (let node: HTMLElement | null = el; node !== null; node = node.parentElement) {
-        if (node.hasAttribute && node.hasAttribute('data-composer-seat') && node.parentElement !== null) {
-          port = findScrollPort(node.parentElement)
-          break
-        }
-      }
-    }
-    portRef.current = port
-    const update = (): void => {
-      const target = port ?? el.parentElement ?? el
-      const r = target.getBoundingClientRect()
-      const right = Math.max(4, window.innerWidth - r.right + 6)
-      setPos((prev) => (prev && prev.top === r.top && prev.bottom === r.bottom && prev.right === right ? prev : {
-        top: r.top, bottom: r.bottom, right,
-      }))
-    }
-    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null
-    ro?.observe(port ?? el)
-    window.addEventListener('resize', update)
-    port?.addEventListener('scroll', update, { passive: true })
-    update()
-    return () => {
-      ro?.disconnect()
-      window.removeEventListener('resize', update)
-      port?.removeEventListener('scroll', update)
-    }
-  }, [])
-
-  // Scroll tracking: the turn nearest the viewport's upper-middle turns blue.
-  useEffect(() => {
-    const port = portRef.current
-    if (port === null) return
     let raf = 0
+    let bound: HTMLElement | null = null
+
+    const resolvePort = (): HTMLElement | null => {
+      const row = document.querySelector<HTMLElement>('[data-chat-anchor-key]')
+      if (row !== null) {
+        const p = findScrollPort(row)
+        if (p !== null) return p
+      }
+      const seat = document.querySelector<HTMLElement>('[data-composer-seat]')
+      if (seat !== null && seat.parentElement !== null) {
+        const p = findScrollPort(seat.parentElement, true)
+        if (p !== null) return p
+      }
+      return null
+    }
+
     const onScroll = (): void => {
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
+        const port = portRef.current
+        if (port === null) return
         const rect = port.getBoundingClientRect()
+        if (rect.height === 0) return
         const center = rect.top + rect.height * 0.42
         let best: HTMLElement | null = null
         let bestDist = Infinity
@@ -738,13 +724,39 @@ function TimelineOverlay(props: HistoryDockProps & {
         }
       })
     }
-    port.addEventListener('scroll', onScroll, { passive: true })
-    onScroll()
+
+    const update = (): void => {
+      const portNew = resolvePort()
+      if (portNew !== bound) {
+        if (bound !== null) bound.removeEventListener('scroll', onScroll)
+        bound = portNew
+        portRef.current = portNew
+        if (portNew !== null) portNew.addEventListener('scroll', onScroll, { passive: true })
+      }
+      const target = portNew ?? el.parentElement ?? el
+      const r = target.getBoundingClientRect()
+      const right = Math.max(4, window.innerWidth - r.right + 6)
+      setPos((prev) => (prev && prev.top === r.top && prev.bottom === r.bottom && prev.right === right ? prev : {
+        top: r.top, bottom: r.bottom, right,
+      }))
+      if (portNew !== null && portRef.current === portNew) onScroll()
+    }
+
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null
+    ro?.observe(el.parentElement ?? el)
+    window.addEventListener('resize', update)
+    // The message list renders asynchronously after session load; re-resolve
+    // the scrollport until it exists (cheap idle poll).
+    const timer = setInterval(update, 1000)
+    update()
     return () => {
-      port.removeEventListener('scroll', onScroll)
+      ro?.disconnect()
+      clearInterval(timer)
+      window.removeEventListener('resize', update)
+      if (bound !== null) bound.removeEventListener('scroll', onScroll)
       cancelAnimationFrame(raf)
     }
-  }, [seqByKey, session])
+  }, [seqByKey])
 
   // Keep the window centered on the active turn (recent-message-centered).
   useEffect(() => {

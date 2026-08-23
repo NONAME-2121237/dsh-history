@@ -43,8 +43,9 @@ export declare function truncate(text: string, max: number): string;
 /** Clamp a number into [min, max]. */
 export declare function clamp(n: number, min: number, max: number): number;
 /** Find the nearest overflow-y scroll ancestor of an element (the message
- *  viewport for rows inside the conversation). */
-export declare function findScrollPort(el: HTMLElement): HTMLElement | null;
+ *  viewport for rows inside the conversation). Pass `includeSelf` to also
+ *  accept the element itself when it is the scrollport. */
+export declare function findScrollPort(el: HTMLElement, includeSelf?: boolean): HTMLElement | null;
 /** The conversation snapshot slice this plugin reads (structural subset). */
 export interface HistoryConversationSnapshot {
     sessionId?: string;
