@@ -153,9 +153,29 @@ export function findAnchor(key: string): HTMLElement | null {
   return null
 }
 
-/** Scroll a message row into view (centered) and flash-highlight it.
- *  Positions the conversation scrollport directly (synchronous, reliable),
- *  rather than relying on async scrollIntoView which can silently no-op. */
+/** Scroll the scrollport to a target scrollTop over a short animation.
+ *  rAF-driven so the speed is deterministic and independent of the host's
+ *  `scroll-behavior` CSS; the jump must stay fast (≈200ms) yet visible.
+ *  Returns false when the target equals the current position. */
+function animateScroll(port: HTMLElement, target: number, duration = 200): boolean {
+  const start = port.scrollTop
+  const delta = target - start
+  if (Math.abs(delta) < 1) return false
+  const t0 = performance.now()
+  const ease = (t: number): number => 1 - Math.pow(1 - t, 3)
+  const step = (now: number): void => {
+    const p = Math.min(1, (now - t0) / duration)
+    port.scrollTop = start + delta * ease(p)
+    if (p < 1) requestAnimationFrame(step)
+  }
+  requestAnimationFrame(step)
+  return true
+}
+
+/** Scroll a message row into view (top-aligned) and flash-highlight it.
+ *  Positions the conversation scrollport directly with a short animated
+ *  scroll (see animateScroll), rather than relying on async scrollIntoView
+ *  which can silently no-op. */
 export function scrollToKey(key: string): boolean {
   const el = findAnchor(key)
   if (!el) return false
@@ -178,12 +198,12 @@ export function scrollToKey(key: string): boolean {
     if (port !== null) {
       const elRect = el.getBoundingClientRect()
       const portRect = port.getBoundingClientRect()
-      const target = port.scrollTop + elRect.top - portRect.top - portRect.height / 2 + elRect.height / 2
-      if (Math.abs(target - port.scrollTop) > 1) port.scrollTop = target
-      return true
+      // 对齐：用户消息上沿贴视口上沿（快速动画滚动而非瞬跳）。
+      const target = port.scrollTop + elRect.top - portRect.top
+      return animateScroll(port, target)
     }
     try {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
     } catch {
       return false
     }

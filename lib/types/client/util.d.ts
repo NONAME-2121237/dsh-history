@@ -68,9 +68,10 @@ export declare function collectWindowItems(session: HistoryConversationSnapshot 
 };
 /** Find the conversation row DOM element for a chat-node anchor key. */
 export declare function findAnchor(key: string): HTMLElement | null;
-/** Scroll a message row into view (centered) and flash-highlight it.
- *  Positions the conversation scrollport directly (synchronous, reliable),
- *  rather than relying on async scrollIntoView which can silently no-op. */
+/** Scroll a message row into view (top-aligned) and flash-highlight it.
+ *  Positions the conversation scrollport directly with a short animated
+ *  scroll (see animateScroll), rather than relying on async scrollIntoView
+ *  which can silently no-op. */
 export declare function scrollToKey(key: string): boolean;
 /** Copy text to the clipboard (Clipboard API first, execCommand fallback). */
 export declare function copyText(text: string): Promise<boolean>;
