@@ -235,32 +235,39 @@ function TimelineOverlay(props: HistoryDockProps & {
         const rect = port.getBoundingClientRect()
         if (rect.height === 0) return
         const center = rect.top + rect.height * 0.42
-        let bestN: number | null = null
-        let bestDist = Infinity
-        const domTurn = domTurnRef.current
-        const rows = port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')
-        for (let i = 0; i < rows.length; i++) {
-          const r = rows[i]
-          if (r === null) continue
-          const key = r.dataset.chatAnchorKey
-          if (typeof key !== 'string' || key === '') continue
-          const m = /^(\d+):([a-z-]+)/.exec(key)
+        // 引擎 turn 编号是跨会话全局递增的（9/13/14...），不是会话内 1-based；
+        // 正确映射 = 按 input-message 行的文档顺序去重（同一引擎 turn 的
+        // user+steering 多条行算同一轮）后，第 i 个去重 turn = turns[i-1]。
+        const turnOrder: number[] = []
+        const seen = new Set<number>()
+        for (const r of port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')) {
+          const m = /^(\d+):([a-z-]+)/.exec(r.dataset.chatAnchorKey ?? '')
           if (m === null) continue
-          // 只认用户消息行（input-message*）；工具行/回复行不参与高亮，
-          // 否则长回复会霸占视口中心导致错高亮。
           if (!m[2].startsWith('input-message')) continue
           const n = Number(m[1])
-          const idx = n - 1
-          if (idx < 0 || idx >= turnsList.length) continue
-          if (!domTurn.has(n)) domTurn.set(n, key)
+          if (seen.has(n)) continue
+          seen.add(n)
+          turnOrder.push(n)
+        }
+        let bestIdx: number | null = null
+        let bestDist = Infinity
+        const domTurn = domTurnRef.current
+        for (const r of port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')) {
+          const m = /^(\d+):([a-z-]+)/.exec(r.dataset.chatAnchorKey ?? '')
+          if (m === null) continue
+          if (!m[2].startsWith('input-message')) continue
+          const n = Number(m[1])
+          const idx = turnOrder.indexOf(n)
+          if (idx === -1 || idx >= turnsList.length) continue
+          if (!domTurn.has(n)) domTurn.set(n, r.dataset.chatAnchorKey ?? '')
           const rr = r.getBoundingClientRect()
           const inView = rr.bottom > rect.top && rr.top < rect.bottom
           // 视口内的行权重 0（最近优先）；视口外的行按距离排最后。
           const dist = Math.abs(rr.top + rr.height / 2 - center) + (inView ? 0 : 1e6)
-          if (dist < bestDist) { bestDist = dist; bestN = n }
+          if (dist < bestDist) { bestDist = dist; bestIdx = idx }
         }
-        if (bestN !== null) {
-          const seq = turnsList[bestN - 1].seq
+        if (bestIdx !== null) {
+          const seq = turnsList[bestIdx].seq
           setActiveSeq((prev) => (prev === seq ? prev : seq))
         }
       })
