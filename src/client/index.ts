@@ -344,7 +344,21 @@ function TimelineOverlay(props: HistoryDockProps & {
 
   const jumpToTurn = (turn: TurnItem): void => {
     const idx = turnsRef.current.findIndex((t) => t.seq === turn.seq)
-    const key = keys.get(turn.seq) ?? domTurnRef.current.get(idx + 1)
+    let key = keys.get(turn.seq)
+    if (key === undefined && idx >= 0) {
+      // 文档顺序第 idx 个去重用户消息行的 anchor key（引擎 turn 全局编号≠会话轮次）。
+      const seen = new Set<number>()
+      let count = 0
+      for (const r of document.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')) {
+        const m = /^(\d+):([a-z-]+)/.exec(r.dataset.chatAnchorKey ?? '')
+        if (m === null || !m[2].startsWith('input-message')) continue
+        const n = Number(m[1])
+        if (seen.has(n)) continue
+        seen.add(n)
+        if (count === idx) { key = r.dataset.chatAnchorKey ?? undefined; break }
+        count++
+      }
+    }
     if (key === null || key === undefined) {
       // 该轮用户消息不在已加载窗口内：尝试加载更早历史后再次定位。
       if (typeof props.loadOlderFor === 'function' && props.session?.hasMore) {
