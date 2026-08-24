@@ -123,7 +123,10 @@ function TimelineOverlay(props: HistoryDockProps & {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
   const [activeSeq, setActiveSeq] = useState<number | null>(null)
   const [flashSeq, setFlashSeq] = useState<number | null>(null)
-  const [retryAnchor, setRetryAnchor] = useState<number | null>(null)
+  /** 点击跳到未加载轮次时的"追逐"状态：持续 loadOlder 直到目标轮次进入已加载窗口。 */
+  const [chase, setChase] = useState<{ seq: number; loads: number } | null>(null)
+  const chaseRef = useRef(chase)
+  chaseRef.current = chase
   const [pos, setPos] = useState<{ top: number; right: number } | null>(null)
   const [tip, setTip] = useState<{ turn: TurnItem; index: number; at: number } | null>(null)
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -139,6 +142,9 @@ function TimelineOverlay(props: HistoryDockProps & {
   const domTurnRef = useRef(new Map<number, string>())
 
   const VISIBLE = 10
+  // 追逐跳转的保险上限（loadOlder 每次最多拉 50 条事件，一条轮次至少需要
+  // 1 条 user/message 事件，24 次 ≈ 1200 条；正常会话远达不到，防御性封顶）。
+  const CHASE_MAX_LOADS = 24
 
   // seq → anchor key map from the loaded window (for click-jump).
   const keys = useMemo(() => collectWindowItems(session).keys, [session])
@@ -335,19 +341,7 @@ function TimelineOverlay(props: HistoryDockProps & {
     setWinStart(clamp(i - Math.floor(VISIBLE / 2), 0, Math.max(0, list.length - VISIBLE)))
   }
 
-  const jumpToTurn = (turn: TurnItem): void => {
-    const idx = turnsRef.current.findIndex((t) => t.seq === turn.seq)
-    const key = keys.get(turn.seq) ?? domTurnRef.current.get(idx)
-    if (key === null || key === undefined) {
-      // 该轮用户消息不在已加载窗口内：尝试加载更早历史后再次定位。
-      if (typeof props.loadOlderFor === 'function' && props.session?.hasMore) {
-        props.loadOlderFor(String(sessionId)).then(() => {
-          setRetryAnchor(turn.seq)
-        }).catch(() => { /* keep silent */ })
-      }
-      return
-    }
-    if (findAnchor(key) !== null) scrollToKey(key)
+  const flashTurn = (turn: TurnItem): void => {
     setFlashSeq(turn.seq)
     if (typeof props.timeout === 'function') {
       props.timeout(() => setFlashSeq((cur) => (cur === turn.seq ? null : cur)), 1700)
@@ -356,23 +350,51 @@ function TimelineOverlay(props: HistoryDockProps & {
     }
   }
 
-  // Retry a click-jump once its user row lands in the loaded window.
+  const jumpToTurn = (turn: TurnItem): void => {
+    const idx = turnsRef.current.findIndex((t) => t.seq === turn.seq)
+    const key = keys.get(turn.seq) ?? domTurnRef.current.get(idx)
+    if (key === null || key === undefined) {
+      // 该轮用户消息不在已加载窗口内：启动追逐，持续加载更早历史直到
+      // 目标轮次进入窗口（chase effect 驱动），而不是只加载一次。
+      setChase({ seq: turn.seq, loads: 1 })
+      return
+    }
+    if (findAnchor(key) !== null) scrollToKey(key)
+    flashTurn(turn)
+  }
+
+  // Chase a click-jump: each loaded page either lands the target row (jump +
+  // flash) or pages one more batch of older history. Driven by the real
+  // snapshot/keys change from loadOlder (never by bare timers), so each
+  // iteration waits for the previous page to actually render.
   useEffect(() => {
-    if (retryAnchor === null) return
-    const turn = turnsRef.current.find((t) => t.seq === retryAnchor)
-    if (turn === undefined) return
+    if (chase === null) return
+    const turn = turnsRef.current.find((t) => t.seq === chase.seq)
+    if (turn === undefined) {
+      // 轮次列表更新后目标仍在（turns 是全部轮次，理论不会消失）；防御性清除。
+      setChase(null)
+      return
+    }
     const key = keys.get(turn.seq)
     if (key !== undefined) {
-      setRetryAnchor(null)
+      setChase(null)
       if (findAnchor(key) !== null) scrollToKey(key)
-      setFlashSeq(turn.seq)
-      if (typeof props.timeout === 'function') {
-        props.timeout(() => setFlashSeq((cur) => (cur === turn.seq ? null : cur)), 1700)
-      } else {
-        setTimeout(() => setFlashSeq((cur) => (cur === turn.seq ? null : cur)), 1700)
-      }
+      flashTurn(turn)
+      return
     }
-  }, [keys, retryAnchor])
+    // 目标还未加载：能继续翻更早历史就接着翻（loadOlder 幂等，重复调用安全）。
+    if (typeof props.loadOlderFor !== 'function' || props.session?.hasMore !== true) {
+      setChase(null)
+      return
+    }
+    if (props.session?.loadingOlder === true) return
+    if (chase.loads >= CHASE_MAX_LOADS) {
+      setChase(null)
+      return
+    }
+    props.loadOlderFor(String(sessionId)).catch(() => { /* 加载失败时保持等下一次 keys 变化 */ })
+    setChase({ seq: chase.seq, loads: chase.loads + 1 })
+  }, [chase, keys, session])
 
   const lineNodes: ReactElement[] = []
   for (let i = 0; i < shown.length; i++) {
