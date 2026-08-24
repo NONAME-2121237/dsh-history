@@ -148,10 +148,15 @@ function TimelineOverlay(props: HistoryDockProps & {
     return m
   }, [keys])
 
-  // Poll the turn list; the host cache (3s TTL) keeps this cheap.
+  // Poll the turn list; the host cache (3s TTL) keeps this cheap. When the
+  // list changes (e.g. a session switch), reset the highlight to the newest
+  // turn so the rail never goes dark, then re-run the DOM detection once the
+  // message rows land (they render asynchronously after switch).
   useEffect(() => {
     if (sessionId === undefined) return
     let cancelled = false
+    setActiveSeq(null)
+    setWinStart(0)
     const load = (): void => {
       fetch('/history/api/list-turns', {
         method: 'POST',
@@ -163,14 +168,36 @@ function TimelineOverlay(props: HistoryDockProps & {
         .then((data: unknown) => {
           if (cancelled) return
           const record = data as { ok?: boolean; turns?: TurnItem[] }
-          if (record && record.ok === true && Array.isArray(record.turns)) setTurns(record.turns)
+          if (record && record.ok === true && Array.isArray(record.turns)) {
+            const next = record.turns
+            // 旧高亮不在新列表里时，默认高亮最新一轮（保证必有一条蓝线）。
+            if (next.length > 0) {
+              setActiveSeq((prev) => (
+                prev !== null && next.some((t) => t.seq === prev) ? prev : next[next.length - 1].seq
+              ))
+            }
+            setTurns(next)
+          }
         })
         .catch(() => { /* keep last known state */ })
     }
     load()
     const timer = setInterval(load, 3000)
-    return () => { cancelled = true; clearInterval(timer) }
-  }, [sessionId])
+    // 消息区 DOM 在会话切换后异步渲染：定时重跑检测以纠正高亮。
+    const detect = setInterval(() => {
+      const port = portRef.current
+      if (port !== null) {
+        const rect = port.getBoundingClientRect()
+        if (rect.height > 0 && port.querySelector('[data-chat-anchor-key]') !== null) {
+          requestAnimationFrame(() => {
+            const evt = new Event('scroll')
+            port.dispatchEvent(evt)
+          })
+        }
+      }
+    }, 1000)
+    return () => { cancelled = true; clearInterval(timer); clearInterval(detect) }
+  }, [sessionId, seqByKey])
 
   // Geometry + active-turn tracking: pin the rail to the message viewport's
   // right edge. The message rows may not have rendered yet at mount time, so
@@ -203,11 +230,12 @@ function TimelineOverlay(props: HistoryDockProps & {
       raf = requestAnimationFrame(() => {
         const port = portRef.current
         if (port === null) return
+        const turnsList = turnsRef.current
+        if (turnsList.length === 0) return
         const rect = port.getBoundingClientRect()
         if (rect.height === 0) return
         const center = rect.top + rect.height * 0.42
-        const turnsList = turnsRef.current
-        let bestTurn: number | null = null
+        let bestN: number | null = null
         let bestDist = Infinity
         const domTurn = domTurnRef.current
         const rows = port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')
@@ -216,19 +244,24 @@ function TimelineOverlay(props: HistoryDockProps & {
           if (r === null) continue
           const key = r.dataset.chatAnchorKey
           if (typeof key !== 'string' || key === '') continue
-          const m = /^(\d+):/.exec(key)
+          const m = /^(\d+):([a-z-]+)/.exec(key)
           if (m === null) continue
+          // 只认用户消息行（input-message*）；工具行/回复行不参与高亮，
+          // 否则长回复会霸占视口中心导致错高亮。
+          if (!m[2].startsWith('input-message')) continue
           const n = Number(m[1])
           const idx = n - 1
           if (idx < 0 || idx >= turnsList.length) continue
           if (!domTurn.has(n)) domTurn.set(n, key)
           const rr = r.getBoundingClientRect()
-          if (rr.bottom < rect.top - 60 || rr.top > rect.bottom + 60) continue
-          const dist = Math.abs(rr.top + rr.height / 2 - center)
-          if (dist < bestDist) { bestDist = dist; bestTurn = n }
+          const inView = rr.bottom > rect.top && rr.top < rect.bottom
+          // 视口内的行权重 0（最近优先）；视口外的行按距离排最后。
+          const dist = Math.abs(rr.top + rr.height / 2 - center) + (inView ? 0 : 1e6)
+          if (dist < bestDist) { bestDist = dist; bestN = n }
         }
-        if (bestTurn !== null) {
-          setActiveSeq(turnsList[bestTurn - 1].seq)
+        if (bestN !== null) {
+          const seq = turnsList[bestN - 1].seq
+          setActiveSeq((prev) => (prev === seq ? prev : seq))
         }
       })
     }
