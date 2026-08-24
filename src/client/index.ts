@@ -235,40 +235,33 @@ function TimelineOverlay(props: HistoryDockProps & {
         const rect = port.getBoundingClientRect()
         if (rect.height === 0) return
         const center = rect.top + rect.height * 0.42
-        // 引擎 turn 编号是跨会话全局递增的（9/13/14...），不是会话内 1-based；
-        // 正确映射 = 按 input-message 行的文档顺序去重（同一引擎 turn 的
-        // user+steering 多条行算同一轮）后，第 i 个去重 turn = turns[i-1]。
-        const turnOrder: number[] = []
-        const seen = new Set<number>()
-        for (const r of port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')) {
-          const m = /^(\d+):([a-z-]+)/.exec(r.dataset.chatAnchorKey ?? '')
-          if (m === null) continue
-          if (!m[2].startsWith('input-message')) continue
-          const n = Number(m[1])
-          if (seen.has(n)) continue
-          seen.add(n)
-          turnOrder.push(n)
-        }
-        let bestIdx: number | null = null
+        // 权威映射：collectWindowItems(session) 已给出「已加载窗口内 user/steering
+        // 行的 seq → DOM anchor key」映射（seqByKey）。DOM 行的 key 反查 seq，
+        // 再定位到 turns 数组 —— 完全不需要猜引擎 turn 编号（它是跨会话全局
+        // 递增的，9/13/14...，与会话内轮次无绝对对应）。tool/assistant 行无
+        // key 映射，自动被跳过。
+        let bestSeq: number | null = null
         let bestDist = Infinity
         const domTurn = domTurnRef.current
-        for (const r of port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')) {
-          const m = /^(\d+):([a-z-]+)/.exec(r.dataset.chatAnchorKey ?? '')
-          if (m === null) continue
-          if (!m[2].startsWith('input-message')) continue
-          const n = Number(m[1])
-          const idx = turnOrder.indexOf(n)
-          if (idx === -1 || idx >= turnsList.length) continue
-          if (!domTurn.has(n)) domTurn.set(n, r.dataset.chatAnchorKey ?? '')
+        const rows = port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i]
+          if (r === null) continue
+          const key = r.dataset.chatAnchorKey
+          if (typeof key !== 'string' || key === '') continue
+          const seq = seqByKey.get(key)
+          if (seq === undefined) continue
+          const tIdx = turnsList.findIndex((t) => t.seq === seq)
+          if (tIdx === -1) continue
+          if (!domTurn.has(tIdx)) domTurn.set(tIdx, key)
           const rr = r.getBoundingClientRect()
+          // 视口内的行权重 0（最近优先）；视口外的行按距离排后。
           const inView = rr.bottom > rect.top && rr.top < rect.bottom
-          // 视口内的行权重 0（最近优先）；视口外的行按距离排最后。
           const dist = Math.abs(rr.top + rr.height / 2 - center) + (inView ? 0 : 1e6)
-          if (dist < bestDist) { bestDist = dist; bestIdx = idx }
+          if (dist < bestDist) { bestDist = dist; bestSeq = seq }
         }
-        if (bestIdx !== null) {
-          const seq = turnsList[bestIdx].seq
-          setActiveSeq((prev) => (prev === seq ? prev : seq))
+        if (bestSeq !== null) {
+          setActiveSeq((prev) => (prev === bestSeq ? prev : bestSeq))
         }
       })
     }
@@ -344,21 +337,7 @@ function TimelineOverlay(props: HistoryDockProps & {
 
   const jumpToTurn = (turn: TurnItem): void => {
     const idx = turnsRef.current.findIndex((t) => t.seq === turn.seq)
-    let key = keys.get(turn.seq)
-    if (key === undefined && idx >= 0) {
-      // 文档顺序第 idx 个去重用户消息行的 anchor key（引擎 turn 全局编号≠会话轮次）。
-      const seen = new Set<number>()
-      let count = 0
-      for (const r of document.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')) {
-        const m = /^(\d+):([a-z-]+)/.exec(r.dataset.chatAnchorKey ?? '')
-        if (m === null || !m[2].startsWith('input-message')) continue
-        const n = Number(m[1])
-        if (seen.has(n)) continue
-        seen.add(n)
-        if (count === idx) { key = r.dataset.chatAnchorKey ?? undefined; break }
-        count++
-      }
-    }
+    const key = keys.get(turn.seq) ?? domTurnRef.current.get(idx)
     if (key === null || key === undefined) {
       // 该轮用户消息不在已加载窗口内：尝试加载更早历史后再次定位。
       if (typeof props.loadOlderFor === 'function' && props.session?.hasMore) {
